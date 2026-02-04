@@ -98,29 +98,43 @@ async fn main() -> anyhow::Result<()> {
     // Create PID file
     system::cleanup::create_pid_file()?;
 
-    // Setup signal handler
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // Setup signal handlers for graceful shutdown
+    // Handle SIGINT (Ctrl+C), SIGTERM (kill), and SIGHUP (terminal closed/Alt+F4)
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
-    ctrlc::set_handler(move || {
-        let _ = shutdown_tx.blocking_send(());
-    })?;
+    // Create channel to forward shutdown signals to TUI
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<&'static str>(1);
+
+    // Spawn signal handler task
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigint.recv() => {
+                info!("Received SIGINT (Ctrl+C)");
+                let _ = shutdown_tx_clone.send("SIGINT").await;
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM");
+                let _ = shutdown_tx_clone.send("SIGTERM").await;
+            }
+            _ = sighup.recv() => {
+                info!("Received SIGHUP (terminal closed)");
+                let _ = shutdown_tx_clone.send("SIGHUP").await;
+            }
+        }
+    });
 
     // Run cleanup before starting
     system::cleanup::cleanup_orphaned_state().await?;
 
     // Create and run TUI
-    let mut tui_app = tui::TuiApp::new().await?;
+    let mut tui_app = tui::TuiApp::new(shutdown_rx).await?;
 
-    // Run TUI with shutdown handling
-    tokio::select! {
-        result = tui_app.run() => {
-            if let Err(e) = result {
-                error!("TUI error: {}", e);
-            }
-        }
-        _ = shutdown_rx.recv() => {
-            info!("Received shutdown signal");
-        }
+    // Run TUI - it will handle shutdown signals internally
+    if let Err(e) = tui_app.run().await {
+        error!("TUI error: {}", e);
     }
 
     // Cleanup

@@ -17,10 +17,11 @@ path = "src/bin/monarch-lazyvpn-status.rs"
 [dependencies]
 # TUI
 ratatui = "0.26"
-crossterm = "0.27"
+crossterm = { version = "0.27", features = ["event-stream"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -49,9 +50,6 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5"
-
-# Signal handling
-ctrlc = { version = "3", features = ["termination"] }
 
 # File locking
 fs2 = "0.4"

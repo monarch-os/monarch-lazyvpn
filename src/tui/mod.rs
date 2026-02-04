@@ -8,16 +8,17 @@ use crate::app::App;
 use crate::core::error::Result;
 use crate::system::network::NetworkStats;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt;
 use ratatui::prelude::*;
 use std::io::{self, Stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 /// Interval between stats updates (10 seconds)
 const STATS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
@@ -60,11 +61,13 @@ pub struct TuiApp {
     network_stats: Arc<NetworkStats>,
     /// Flag to signal stats task to update
     stats_request_tx: mpsc::Sender<String>,
+    /// Channel to receive shutdown signal
+    shutdown_rx: mpsc::Receiver<&'static str>,
 }
 
 impl TuiApp {
     /// Create a new TUI application
-    pub async fn new() -> Result<Self> {
+    pub async fn new(shutdown_rx: mpsc::Receiver<&'static str>) -> Result<Self> {
         let terminal = init()?;
         let app = App::new().await?;
 
@@ -90,6 +93,7 @@ impl TuiApp {
             stats_rx,
             network_stats,
             stats_request_tx,
+            shutdown_rx,
         })
     }
 
@@ -121,62 +125,92 @@ impl TuiApp {
         // Initialize app
         self.app.initialize().await?;
 
+        // Create async event stream
+        let mut event_stream = EventStream::new();
+        let mut tick_interval = tokio::time::interval(self.tick_rate);
+
         loop {
             // Draw UI first
             self.terminal.draw(|f| ui::render(f, &mut self.app))?;
 
-            // Poll for events with short timeout to keep spinner animating
-            if event::poll(self.tick_rate)? {
-                if let Event::Key(key) = event::read()? {
-                    // Handle key events (non-blocking for most, spawns tasks for long ops)
-                    match events::handle_key_event(&mut self.app, key).await {
-                        Ok(should_continue) => {
-                            if !should_continue {
-                                break;
+            // Use tokio::select! to handle multiple async sources
+            tokio::select! {
+                // Handle terminal events (keyboard, mouse, etc.)
+                maybe_event = event_stream.next() => {
+                    match maybe_event {
+                        Some(Ok(Event::Key(key))) => {
+                            match events::handle_key_event(&mut self.app, key).await {
+                                Ok(should_continue) => {
+                                    if !should_continue {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Error handling key event: {}", e);
+                                    self.app.error_message = Some(e.to_string());
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Error handling key event: {}", e);
-                            self.app.error_message = Some(e.to_string());
+                        Some(Ok(_)) => {
+                            // Other events (mouse, resize, etc.) - ignore for now
+                        }
+                        Some(Err(e)) => {
+                            // Terminal error - likely terminal closed
+                            info!("Terminal event error (terminal likely closed): {}", e);
+                            break;
+                        }
+                        None => {
+                            // Event stream ended - terminal closed
+                            info!("Event stream ended, terminal closed");
+                            break;
                         }
                     }
                 }
-            }
 
-            // Tick spinner animation when busy
-            if self.app.is_busy() {
-                self.app.tick_spinner();
-            }
+                // Handle shutdown signals from main
+                Some(signal_name) = self.shutdown_rx.recv() => {
+                    info!("Received shutdown signal: {}", signal_name);
+                    break;
+                }
 
-            // Check if should quit
-            if self.app.should_quit {
-                break;
-            }
+                // Tick for spinner animation and periodic tasks
+                _ = tick_interval.tick() => {
+                    // Tick spinner animation when busy
+                    if self.app.is_busy() {
+                        self.app.tick_spinner();
+                    }
 
-            // Check for pending async operation results
-            self.app.check_pending_operation().await;
+                    // Check if should quit
+                    if self.app.should_quit {
+                        break;
+                    }
 
-            // Check for pending refresh results (non-blocking)
-            self.app.check_pending_refresh();
+                    // Check for pending async operation results
+                    self.app.check_pending_operation().await;
 
-            // Process any stats updates from background task (non-blocking)
-            self.process_stats_updates();
+                    // Check for pending refresh results (non-blocking)
+                    self.app.check_pending_refresh();
 
-            // Request stats update periodically - only when connected and interval elapsed
-            if self.app.connection.is_connected()
-                && self.last_stats_update.elapsed() >= STATS_UPDATE_INTERVAL
-            {
-                self.request_stats_update();
-                self.last_stats_update = Instant::now();
-            }
+                    // Process any stats updates from background task (non-blocking)
+                    self.process_stats_updates();
 
-            // Request immediate IP refresh after connection (flag set by finalize_connect)
-            if self.app.needs_ip_refresh {
-                self.app.needs_ip_refresh = false;
-                // Invalidate IP cache before requesting update to get fresh IP
-                self.network_stats.invalidate_ip_cache().await;
-                self.request_stats_update();
-                self.last_stats_update = Instant::now();
+                    // Request stats update periodically - only when connected and interval elapsed
+                    if self.app.connection.is_connected()
+                        && self.last_stats_update.elapsed() >= STATS_UPDATE_INTERVAL
+                    {
+                        self.request_stats_update();
+                        self.last_stats_update = Instant::now();
+                    }
+
+                    // Request immediate IP refresh after connection (flag set by finalize_connect)
+                    if self.app.needs_ip_refresh {
+                        self.app.needs_ip_refresh = false;
+                        // Invalidate IP cache before requesting update to get fresh IP
+                        self.network_stats.invalidate_ip_cache().await;
+                        self.request_stats_update();
+                        self.last_stats_update = Instant::now();
+                    }
+                }
             }
         }
 
