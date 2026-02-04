@@ -177,6 +177,9 @@ pub struct App {
 
     /// Provider being imported (set when file picker opens after provider selection)
     pub pending_provider_import: Option<String>,
+
+    /// Effective killswitch state for current connection (accounts for split-tunnel)
+    pending_killswitch_enabled: bool,
 }
 
 impl App {
@@ -225,6 +228,7 @@ impl App {
             needs_ip_refresh: false,
             provider_menu: crate::tui::widgets::ProviderMenu::new(),
             pending_provider_import: None,
+            pending_killswitch_enabled: false,
         })
     }
 
@@ -1302,6 +1306,9 @@ impl App {
             self.config.killswitch_enabled
         };
 
+        // Store effective killswitch state for finalize_connect
+        self.pending_killswitch_enabled = killswitch_enabled;
+
         let killswitch_allow_lan = self.config.killswitch_allow_lan;
         let killswitch_lan_ranges = self.config.killswitch_lan_ranges.clone();
         let ipv6_disabled = self.config.ipv6_disabled;
@@ -1442,8 +1449,8 @@ impl App {
     /// Finalize connection after background task completes
     pub fn finalize_connect(&mut self, success: bool) {
         if success {
-            // Update killswitch_active based on config setting
-            self.connection.set_killswitch_active(self.config.killswitch_enabled);
+            // Update killswitch_active based on effective value (accounts for split-tunnel)
+            self.connection.set_killswitch_active(self.pending_killswitch_enabled);
 
             let _ = self.connection.set_connected();
             if let Some(server) = self.connection.current_server() {

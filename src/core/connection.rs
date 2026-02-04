@@ -425,6 +425,7 @@ impl ConnectionManager {
             if let (Some(server_id), Some(server_name)) =
                 (persisted.server_id.clone(), persisted.server_name.clone())
             {
+                let provider = persisted.server_provider.unwrap_or_default();
                 // Create a server object with restored fields for display purposes
                 self.current_server = Some(crate::core::server::Server {
                     id: server_id,
@@ -434,9 +435,9 @@ impl ConnectionManager {
                     city: persisted.server_city.unwrap_or_default(),
                     ip: String::new(),
                     pubkey: String::new(),
-                    provider: persisted.server_provider.unwrap_or_default(),
+                    provider: provider.clone(),
                     features: crate::core::server::ServerFeatures::default(),
-                    is_custom: false,
+                    is_custom: provider == "custom",
                     allowed_ips: persisted.server_allowed_ips.unwrap_or_else(|| "0.0.0.0/0".to_string()),
                 });
             }
@@ -539,6 +540,11 @@ impl ConnectionManager {
                 if let (Some(server_id), Some(server_name)) =
                     (per.server_id.clone(), per.server_name.clone())
                 {
+                    let provider = per.server_provider.clone().unwrap_or_default();
+                    // Use persisted allowed_ips (reliable), fallback to detected, then default
+                    let allowed_ips = per.server_allowed_ips.clone()
+                        .or_else(|| det.allowed_ips.clone())
+                        .unwrap_or_else(|| "0.0.0.0/0".to_string());
                     self.current_server = Some(Server {
                         id: server_id,
                         name: server_name.clone(),
@@ -547,10 +553,10 @@ impl ConnectionManager {
                         city: per.server_city.clone().unwrap_or_default(),
                         ip: String::new(),
                         pubkey: String::new(),
-                        provider: per.server_provider.clone().unwrap_or_default(),
+                        provider: provider.clone(),
                         features: crate::core::server::ServerFeatures::default(),
-                        is_custom: false,
-                        allowed_ips: det.allowed_ips.clone().unwrap_or_else(|| "0.0.0.0/0".to_string()),
+                        is_custom: provider == "custom",
+                        allowed_ips,
                     });
                     self.persist_state()?;
                     return Ok(Some(format!("Restored connection to {}", server_name)));

@@ -254,12 +254,13 @@ fn read_status() -> Status {
     let (rx_bytes, tx_bytes) = read_interface_stats(&active_interface);
 
     // Build text and tooltip based on whether we have metadata
+    // Text is just an icon, details go in tooltip
     let (text, tooltip) = if let Some(ref server) = server_name {
         // We have metadata from monarch-lazyvpn
         let text = if killswitch_active {
-            format!("🔒 VPN: {}", server)
+            "󰦝".to_string()  // nf-md-shield_lock (locked shield)
         } else {
-            format!("VPN: {}", server)
+            "󰖂".to_string()  // nf-md-vpn (VPN icon)
         };
 
         let mut tooltip_lines = vec![format!("Connected to {}", server)];
@@ -275,6 +276,8 @@ fn read_status() -> Status {
         tooltip_lines.push(format!("Traffic: ↓{} ↑{}", format_bytes(rx_bytes), format_bytes(tx_bytes)));
         if killswitch_active {
             tooltip_lines.push("Killswitch: Active".to_string());
+        } else {
+            tooltip_lines.push("Killswitch: Inactive".to_string());
         }
         if split_tunnel {
             tooltip_lines.push("Mode: Split Tunnel".to_string());
@@ -283,7 +286,7 @@ fn read_status() -> Status {
         (text, tooltip_lines.join("\n"))
     } else {
         // No metadata - VPN established externally (Task 8)
-        let text = "VPN: Active".to_string();
+        let text = "󰖂".to_string();  // nf-md-vpn (VPN icon)
         let tooltip = format!(
             "WireGuard interface {} active\nIP: {}\nTraffic: ↓{} ↑{}",
             active_interface,
@@ -334,7 +337,7 @@ fn disconnected_status() -> Status {
         interface: None,
         killswitch_active: false,
         split_tunnel: false,
-        text: "VPN: OFF".to_string(),
+        text: "󰌿".to_string(),  // nf-md-lock_open_outline (unlocked padlock)
         tooltip: "Not connected to VPN".to_string(),
         class: "disconnected".to_string(),
     }
