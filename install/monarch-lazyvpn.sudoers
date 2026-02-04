@@ -1,0 +1,39 @@
+# Sudoers configuration for monarch-lazyvpn
+# Allows VPN management commands without password prompt for users in wheel/sudo group
+#
+# Install to: /etc/sudoers.d/monarch-lazyvpn
+# IMPORTANT: Use 'visudo -c -f monarch-lazyvpn.sudoers' to validate before installing
+#
+# This file should have permissions 0440 and be owned by root:root
+
+# WireGuard management - wg-quick up/down for wg0-wg9 interfaces
+%wheel ALL=(root) NOPASSWD: /usr/bin/wg-quick up /run/user/*/wg[0-9].conf
+%wheel ALL=(root) NOPASSWD: /usr/bin/wg-quick down wg[0-9]
+%sudo  ALL=(root) NOPASSWD: /usr/bin/wg-quick up /run/user/*/wg[0-9].conf
+%sudo  ALL=(root) NOPASSWD: /usr/bin/wg-quick down wg[0-9]
+
+# nftables for killswitch - only monarch-specific tables
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft -f /run/user/*/monarch-killswitch.nft
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft -f /run/user/*/monarch-ks-disable.nft
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft delete table inet monarch_killswitch
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft delete table ip6 monarch_killswitch_v6
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft list table inet monarch_killswitch
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft -f /run/user/*/monarch-killswitch.nft
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft -f /run/user/*/monarch-ks-disable.nft
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft delete table inet monarch_killswitch
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft delete table ip6 monarch_killswitch_v6
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft list table inet monarch_killswitch
+
+# nftables cleanup for wg-quick tables (manual teardown fallback)
+%wheel ALL=(root) NOPASSWD: /usr/bin/nft delete table ip wg-quick-wg[0-9]
+%sudo  ALL=(root) NOPASSWD: /usr/bin/nft delete table ip wg-quick-wg[0-9]
+
+# IPv6 sysctl - only disable_ipv6 setting
+%wheel ALL=(root) NOPASSWD: /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=0
+%wheel ALL=(root) NOPASSWD: /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=1
+%sudo  ALL=(root) NOPASSWD: /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=0
+%sudo  ALL=(root) NOPASSWD: /usr/bin/sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
+# Interface cleanup fallback - only wg0-wg9
+%wheel ALL=(root) NOPASSWD: /usr/bin/ip link delete dev wg[0-9]
+%sudo  ALL=(root) NOPASSWD: /usr/bin/ip link delete dev wg[0-9]

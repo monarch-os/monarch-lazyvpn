@@ -1,0 +1,62 @@
+// Polkit rules for monarch-lazyvpn
+// Allows VPN management commands without password prompt for users in wheel/sudo group
+//
+// Install to: /usr/share/polkit-1/rules.d/50-monarch-lazyvpn.rules
+// Requires: polkit >= 0.106
+
+polkit.addRule(function(action, subject) {
+    // Only apply to pkexec actions
+    if (action.id != "org.freedesktop.policykit.exec") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    // Check if user is in wheel or sudo group
+    if (!subject.isInGroup("wheel") && !subject.isInGroup("sudo")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    // Get the command being executed
+    var program = action.lookup("program");
+    var cmdline = action.lookup("command_line");
+
+    if (!program || !cmdline) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    // Allowed commands for monarch-lazyvpn
+    var allowedPatterns = [
+        // WireGuard management
+        /^\/usr\/bin\/wg-quick (up|down) /,
+        /^wg-quick (up|down) /,
+
+        // nftables for killswitch
+        /^\/usr\/bin\/nft -f \/run\/user\/\d+\/monarch-killswitch\.nft$/,
+        /^nft -f \/run\/user\/\d+\/monarch-killswitch\.nft$/,
+        /^\/usr\/bin\/nft -f \/run\/user\/\d+\/monarch-ks-disable\.nft$/,
+        /^nft -f \/run\/user\/\d+\/monarch-ks-disable\.nft$/,
+        /^\/usr\/bin\/nft delete table (inet|ip6) monarch_killswitch/,
+        /^nft delete table (inet|ip6) monarch_killswitch/,
+        /^\/usr\/bin\/nft delete table ip wg-quick-wg\d+$/,
+        /^nft delete table ip wg-quick-wg\d+$/,
+        /^\/usr\/bin\/nft list table inet monarch_killswitch$/,
+        /^nft list table inet monarch_killswitch$/,
+
+        // IPv6 sysctl
+        /^\/usr\/bin\/sysctl -w net\.ipv6\.conf\.all\.disable_ipv6=[01]$/,
+        /^sysctl -w net\.ipv6\.conf\.all\.disable_ipv6=[01]$/,
+
+        // Interface cleanup (fallback)
+        /^\/usr\/bin\/ip link delete dev wg\d+$/,
+        /^ip link delete dev wg\d+$/
+    ];
+
+    // Check if command matches any allowed pattern
+    for (var i = 0; i < allowedPatterns.length; i++) {
+        if (allowedPatterns[i].test(cmdline)) {
+            polkit.log("monarch-lazyvpn: Allowing command for user " + subject.user + ": " + cmdline);
+            return polkit.Result.YES;
+        }
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});
