@@ -404,7 +404,7 @@ impl App {
         info!("Refreshing server list...");
 
 
-        match get_servers(force).await {
+        match get_servers(force, &self.config.configured_providers).await {
             Ok(cache) => {
                 // Filter servers to only configured providers
                 let filtered_servers: Vec<Server> = cache.servers
@@ -1142,9 +1142,10 @@ impl App {
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
 
+        let providers = self.config.configured_providers.clone();
         tokio::spawn(async move {
             info!("Background refresh started");
-            let result = match get_servers(true).await {
+            let result = match get_servers(true, &providers).await {
                 Ok(cache) => {
                     let count = cache.servers.len();
                     info!("Background refresh completed: {} servers", count);
