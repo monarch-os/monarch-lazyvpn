@@ -77,6 +77,42 @@ impl CustomProvider {
         Ok(WgConfig::parse(&content))
     }
 
+    /// Rename a stored custom config file
+    pub fn rename_config(old_name: &str, new_name: &str) -> Result<()> {
+        let servers_dir = Self::servers_dir()?;
+        let old_path = servers_dir.join(format!("{}.conf", old_name));
+        let new_path = servers_dir.join(format!("{}.conf", new_name));
+
+        if !old_path.exists() {
+            return Err(VpnError::ConfigError(format!(
+                "Custom config '{}' not found",
+                old_name
+            )));
+        }
+
+        if new_path.exists() {
+            return Err(VpnError::ConfigError(format!(
+                "A custom config named '{}' already exists",
+                new_name
+            )));
+        }
+
+        fs::rename(&old_path, &new_path)?;
+        Ok(())
+    }
+
+    /// Delete a stored custom config file
+    pub fn delete_config(name: &str) -> Result<()> {
+        let servers_dir = Self::servers_dir()?;
+        let config_path = servers_dir.join(format!("{}.conf", name));
+
+        if config_path.exists() {
+            fs::remove_file(&config_path)?;
+        }
+
+        Ok(())
+    }
+
     /// List all custom configs
     pub fn list_custom_configs() -> Result<Vec<String>> {
         let servers_dir = Self::servers_dir()?;

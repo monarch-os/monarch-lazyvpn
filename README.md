@@ -56,6 +56,8 @@ monarch-lazyvpn
 | `f` | Toggle favorite |
 | `/` | Search |
 | `i` | Import config |
+| `R` | Rename custom config |
+| `x` / `Del` | Delete custom config |
 | `q` | Quit |
 
 ### Status binary
@@ -91,7 +93,7 @@ Configuration is stored in `~/.config/monarch-lazyvpn/`:
 
 - `config.toml` - Application settings
 - `.connection_state` - Persistent connection state
-- `custom-configs/` - Custom WireGuard configuration files
+- `servers/` - Custom WireGuard configuration files
 
 ### config.toml options
 
@@ -130,7 +132,25 @@ configured_providers = ["protonvpn", "custom"]
 2. Select "Custom Config"
 3. Navigate to your `.conf` file
 
-Or manually place `.conf` files in `~/.config/monarch-lazyvpn/custom-configs/`
+Or manually place `.conf` files in `~/.config/monarch-lazyvpn/servers/`
+
+#### Renaming a custom config
+
+1. Select the custom config in the server list
+2. Press `R`
+3. Edit the name and press `Enter` (`Esc` to cancel)
+
+This renames the stored config file and moves its credentials and favorite entry
+to the new name. You cannot rename a config while connected to it — disconnect first.
+
+#### Deleting a custom config
+
+1. Select the custom config in the server list
+2. Press `x` (or `Del`)
+3. Confirm with `y`
+
+This removes the stored config file, its credentials from the keyring, and any
+favorite entry. You cannot delete a config while connected to it — disconnect first.
 
 ## Architecture
 

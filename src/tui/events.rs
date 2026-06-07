@@ -12,6 +12,16 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
         app.clear_messages();
     }
 
+    // Handle delete confirmation popup
+    if app.pending_delete.is_some() {
+        return handle_delete_confirm_key(app, key).await;
+    }
+
+    // Handle rename input popup
+    if app.rename_target.is_some() {
+        return handle_rename_key(app, key).await;
+    }
+
     // Handle file picker mode
     if app.file_picker.active {
         return handle_file_picker_key(app, key).await;
@@ -175,6 +185,24 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.file_picker.open();
         }
 
+        // Delete selected custom config (with confirmation)
+        KeyCode::Char('x') | KeyCode::Delete => {
+            // Ignore if busy
+            if app.is_busy() {
+                return Ok(true);
+            }
+            app.request_delete_custom();
+        }
+
+        // Rename selected custom config
+        KeyCode::Char('R') => {
+            // Ignore if busy
+            if app.is_busy() {
+                return Ok(true);
+            }
+            app.request_rename_custom();
+        }
+
         // Add provider - open provider menu
         KeyCode::Char('p') | KeyCode::Char('P') => {
             app.provider_menu.open();
@@ -284,6 +312,46 @@ async fn handle_provider_menu_key(app: &mut App, key: KeyEvent) -> Result<bool> 
             app.file_picker.open();
         }
 
+        _ => {}
+    }
+
+    Ok(true)
+}
+
+/// Handle key events in the delete confirmation popup
+async fn handle_delete_confirm_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        // Confirm deletion
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.confirm_delete_custom();
+        }
+        // Cancel deletion
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+            app.cancel_delete();
+        }
+        _ => {}
+    }
+
+    Ok(true)
+}
+
+/// Handle key events in the rename input popup
+async fn handle_rename_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        // Confirm rename
+        KeyCode::Enter => {
+            app.confirm_rename_custom();
+        }
+        // Cancel rename
+        KeyCode::Esc => {
+            app.cancel_rename();
+        }
+        KeyCode::Backspace => {
+            app.rename_pop();
+        }
+        KeyCode::Char(c) => {
+            app.rename_push(c);
+        }
         _ => {}
     }
 
