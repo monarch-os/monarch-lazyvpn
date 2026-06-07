@@ -2,8 +2,9 @@
 
 use crate::app::App;
 use crate::tui::widgets::{
-    render_current_status, render_file_picker, render_first_launch_message, render_help_popup,
-    render_profile_config, render_provider_menu, render_server_list,
+    render_current_status, render_delete_confirm, render_file_picker, render_first_launch_message,
+    render_help_popup, render_profile_config, render_provider_menu, render_rename_popup,
+    render_server_list,
 };
 use ratatui::{
     prelude::*,
@@ -62,6 +63,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_provider_menu(frame, area, &app.provider_menu);
     }
 
+    // Render delete confirmation popup if pending
+    if let Some(ref server) = app.pending_delete {
+        render_delete_confirm(frame, area, &server.name);
+    }
+
+    // Render rename input popup if active
+    if app.rename_target.is_some() {
+        render_rename_popup(frame, area, &app.rename_buffer);
+    }
+
     // Render first launch message if no providers configured and no popup active
     if app.is_first_launch() && !app.file_picker.active && !app.provider_menu.active && !app.show_help && !app.is_refreshing {
         render_first_launch_message(frame, area);
@@ -113,7 +124,7 @@ fn render_help_bar(frame: &mut Frame, app: &App, area: Rect) {
             app.search_filter
         )
     } else {
-        " [q] Quit  [↑↓/jk] Navigate  [Enter] Connect  [d] Disconnect  [r] Refresh  [f] Favorite  [K] Killswitch  [P] Provider  [/] Search  [?] Help".to_string()
+        " [q] Quit  [↑↓/jk] Navigate  [Enter] Connect  [d] Disconnect  [r] Refresh  [f] Favorite  [K] Killswitch  [i] Import  [R] Rename  [x] Delete  [P] Provider  [/] Search  [?] Help".to_string()
     };
 
     let style = if app.search_mode {

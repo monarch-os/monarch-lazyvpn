@@ -77,6 +77,42 @@ impl CustomProvider {
         Ok(WgConfig::parse(&content))
     }
 
+    /// Rename a stored custom config file
+    pub fn rename_config(old_name: &str, new_name: &str) -> Result<()> {
+        let servers_dir = Self::servers_dir()?;
+        let old_path = servers_dir.join(format!("{}.conf", old_name));
+        let new_path = servers_dir.join(format!("{}.conf", new_name));
+
+        if !old_path.exists() {
+            return Err(VpnError::ConfigError(format!(
+                "Custom config '{}' not found",
+                old_name
+            )));
+        }
+
+        if new_path.exists() {
+            return Err(VpnError::ConfigError(format!(
+                "A custom config named '{}' already exists",
+                new_name
+            )));
+        }
+
+        fs::rename(&old_path, &new_path)?;
+        Ok(())
+    }
+
+    /// Delete a stored custom config file
+    pub fn delete_config(name: &str) -> Result<()> {
+        let servers_dir = Self::servers_dir()?;
+        let config_path = servers_dir.join(format!("{}.conf", name));
+
+        if config_path.exists() {
+            fs::remove_file(&config_path)?;
+        }
+
+        Ok(())
+    }
+
     /// List all custom configs
     pub fn list_custom_configs() -> Result<Vec<String>> {
         let servers_dir = Self::servers_dir()?;
@@ -205,6 +241,22 @@ impl VpnProvider for CustomProvider {
             .strip_prefix("custom/")
             .unwrap_or(&server.name);
 
+        // Filter out IPv6 from the interface Address to avoid wg-quick's
+        // `ip -6 address add` failing on systems where IPv6 is disabled.
+        let ipv4_address = {
+            let v4: Vec<&str> = creds
+                .address
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && !s.contains(':'))
+                .collect();
+            if v4.is_empty() {
+                creds.address.trim().to_string()
+            } else {
+                v4.join(", ")
+            }
+        };
+
         if let Ok(config) = Self::load_sanitized_config(config_name) {
             let dns = config.dns.as_deref().unwrap_or("1.1.1.1");
             let allowed_ips = config.allowed_ips.as_deref().unwrap_or("0.0.0.0/0, ::/0");
@@ -243,7 +295,7 @@ impl VpnProvider for CustomProvider {
                  AllowedIPs = {}\n\
                  PersistentKeepalive = {}\n",
                 creds.private_key,
-                creds.address,
+                ipv4_address,
                 dns,
                 server.pubkey,
                 server.ip,
@@ -264,7 +316,7 @@ impl VpnProvider for CustomProvider {
                  Endpoint = {}:51820\n\
                  AllowedIPs = 0.0.0.0/0\n\
                  PersistentKeepalive = 25\n",
-                creds.private_key, creds.address, server.pubkey, server.ip
+                creds.private_key, ipv4_address, server.pubkey, server.ip
             )
         }
     }

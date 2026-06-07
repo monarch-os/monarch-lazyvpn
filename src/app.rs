@@ -26,6 +26,16 @@ const OPERATION_TIMEOUT_SECS: u64 = 90;
 /// Spinner animation frames
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Validate a custom config name so it maps to a safe, single-segment filename
+fn is_valid_config_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(|c| c.is_control())
+}
+
 /// Item in the tree view (flattened for rendering)
 #[derive(Debug, Clone)]
 pub enum TreeListItem {
@@ -180,6 +190,15 @@ pub struct App {
 
     /// Effective killswitch state for current connection (accounts for split-tunnel)
     pending_killswitch_enabled: bool,
+
+    /// Custom config server pending deletion confirmation
+    pub pending_delete: Option<Server>,
+
+    /// Custom config server currently being renamed (None = not in rename mode)
+    pub rename_target: Option<Server>,
+
+    /// Current text buffer for the rename input
+    pub rename_buffer: String,
 }
 
 impl App {
@@ -229,6 +248,9 @@ impl App {
             provider_menu: crate::tui::widgets::ProviderMenu::new(),
             pending_provider_import: None,
             pending_killswitch_enabled: false,
+            pending_delete: None,
+            rename_target: None,
+            rename_buffer: String::new(),
         })
     }
 
@@ -849,6 +871,216 @@ impl App {
             self.config.toggle_favorite(&server_id);
             let _ = self.config.save();
         }
+    }
+
+    /// Request deletion of the currently selected custom config (opens confirmation)
+    pub fn request_delete_custom(&mut self) {
+        match self.selected_server() {
+            Some(server) if server.is_custom => {
+                // Don't allow deleting a config we're currently connected to
+                let connected_to_this = self
+                    .connection
+                    .current_server()
+                    .map(|s| s.id == server.id)
+                    .unwrap_or(false);
+
+                if connected_to_this && self.connection.is_connected() {
+                    self.error_message =
+                        Some("Disconnect before deleting this config".to_string());
+                    return;
+                }
+
+                self.pending_delete = Some(server);
+            }
+            Some(_) => {
+                self.info_message = Some("Only custom configs can be deleted".to_string());
+            }
+            None => {}
+        }
+    }
+
+    /// Cancel a pending custom config deletion
+    pub fn cancel_delete(&mut self) {
+        self.pending_delete = None;
+    }
+
+    /// Confirm and perform deletion of the pending custom config
+    pub fn confirm_delete_custom(&mut self) {
+        let server = match self.pending_delete.take() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let name = server.name.clone();
+        let provider_name = format!("custom/{}", name);
+
+        // Remove the stored config file
+        if let Err(e) = CustomProvider::delete_config(&name) {
+            self.error_message = Some(format!("Failed to delete config: {}", e));
+            return;
+        }
+
+        // Remove credentials from keyring (best-effort, may not exist)
+        if let Err(e) = self.credentials.delete(&provider_name) {
+            warn!("Failed to delete credentials for '{}': {}", name, e);
+        }
+
+        // Remove from favorites if present
+        if self.config.is_favorite(&server.id) {
+            self.config.toggle_favorite(&server.id);
+        }
+
+        // Clear active credentials if they pointed at the deleted config
+        if self
+            .provider_credentials
+            .as_ref()
+            .map(|c| c.provider_name == provider_name)
+            .unwrap_or(false)
+        {
+            self.provider_credentials = None;
+        }
+
+        let _ = self.config.save();
+
+        // Keep selection within bounds after removal
+        let max = self.get_tree_items().len().saturating_sub(1);
+        if self.tree_state.selected_index > max {
+            self.tree_state.selected_index = max;
+        }
+
+        info!("Deleted custom config '{}'", name);
+        self.info_message = Some(format!("Deleted custom config '{}'", name));
+    }
+
+    /// Request renaming of the currently selected custom config (opens input)
+    pub fn request_rename_custom(&mut self) {
+        match self.selected_server() {
+            Some(server) if server.is_custom => {
+                // Don't allow renaming a config we're currently connected to
+                let connected_to_this = self
+                    .connection
+                    .current_server()
+                    .map(|s| s.id == server.id)
+                    .unwrap_or(false);
+
+                if connected_to_this && self.connection.is_connected() {
+                    self.error_message =
+                        Some("Disconnect before renaming this config".to_string());
+                    return;
+                }
+
+                self.rename_buffer = server.name.clone();
+                self.rename_target = Some(server);
+            }
+            Some(_) => {
+                self.info_message = Some("Only custom configs can be renamed".to_string());
+            }
+            None => {}
+        }
+    }
+
+    /// Cancel a pending custom config rename
+    pub fn cancel_rename(&mut self) {
+        self.rename_target = None;
+        self.rename_buffer.clear();
+    }
+
+    /// Append a character to the rename buffer
+    pub fn rename_push(&mut self, c: char) {
+        if !c.is_control() {
+            self.rename_buffer.push(c);
+        }
+    }
+
+    /// Remove the last character from the rename buffer
+    pub fn rename_pop(&mut self) {
+        self.rename_buffer.pop();
+    }
+
+    /// Confirm and perform renaming of the pending custom config
+    pub fn confirm_rename_custom(&mut self) {
+        let server = match self.rename_target.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let old_name = server.name.clone();
+        let new_name = self.rename_buffer.trim().to_string();
+
+        // No-op if the name didn't change
+        if new_name == old_name {
+            self.cancel_rename();
+            return;
+        }
+
+        // Validate the new name (must be a safe, single-segment filename)
+        if !is_valid_config_name(&new_name) {
+            self.error_message = Some("Invalid name (no empty, '/', '.' or '..')".to_string());
+            return;
+        }
+
+        let old_provider_name = format!("custom/{}", old_name);
+        let new_provider_name = format!("custom/{}", new_name);
+
+        // Retrieve existing credentials so we can re-store them under the new key.
+        // A config may exist on disk without credentials (user must re-import),
+        // so a missing entry is not fatal.
+        let creds = if self.credentials.exists(&old_provider_name) {
+            match self.credentials.retrieve(&old_provider_name) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to read credentials: {}", e));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Rename the config file (validates that the target doesn't already exist)
+        if let Err(e) = CustomProvider::rename_config(&old_name, &new_name) {
+            self.error_message = Some(format!("Rename failed: {}", e));
+            return;
+        }
+
+        // Move credentials to the new key
+        if let Some(mut creds) = creds {
+            creds.provider_name = new_provider_name.clone();
+            if let Err(e) = self.credentials.store(&new_provider_name, &creds) {
+                warn!("Failed to store renamed credentials: {}", e);
+            } else if let Err(e) = self.credentials.delete(&old_provider_name) {
+                warn!("Failed to remove old credentials for '{}': {}", old_name, e);
+            }
+
+            // Update active credentials if they pointed at the renamed config
+            if self
+                .provider_credentials
+                .as_ref()
+                .map(|c| c.provider_name == old_provider_name)
+                .unwrap_or(false)
+            {
+                self.provider_credentials = Some(creds);
+            }
+        }
+
+        // Migrate favorite entry (server id is "custom-{name}")
+        let old_id = server.id.clone();
+        let new_id = format!("custom-{}", new_name);
+        if self.config.is_favorite(&old_id) {
+            self.config.toggle_favorite(&old_id);
+            if !self.config.is_favorite(&new_id) {
+                self.config.toggle_favorite(&new_id);
+            }
+        }
+
+        let _ = self.config.save();
+        self.cancel_rename();
+
+        // Keep selection on the renamed server
+        self.select_server_by_id(&new_id);
+
+        info!("Renamed custom config '{}' to '{}'", old_name, new_name);
+        self.info_message = Some(format!("Renamed to '{}'", new_name));
     }
 
     /// Toggle killswitch
@@ -1557,5 +1789,27 @@ impl App {
         self.config.was_connected_on_exit = false;
         let _ = self.config.save();
         self.send_notification("VPN Disconnected", "You are now disconnected", false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_config_name;
+
+    #[test]
+    fn test_valid_config_names() {
+        assert!(is_valid_config_name("home"));
+        assert!(is_valid_config_name("my-vpn_01"));
+        assert!(is_valid_config_name("Work VPN"));
+    }
+
+    #[test]
+    fn test_invalid_config_names() {
+        assert!(!is_valid_config_name(""));
+        assert!(!is_valid_config_name("."));
+        assert!(!is_valid_config_name(".."));
+        assert!(!is_valid_config_name("foo/bar"));
+        assert!(!is_valid_config_name("foo\\bar"));
+        assert!(!is_valid_config_name("foo\nbar"));
     }
 }
