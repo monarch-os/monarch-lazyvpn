@@ -11,6 +11,24 @@ use std::path::Path;
 const PROTONVPN_DNS: &str = "10.2.0.1";
 const PROTONVPN_PORT: u16 = 51820;
 
+/// Keep only the IPv4 entries from a (possibly dual-stack) comma-separated
+/// address list. IPv6 entries contain ':' and are dropped so the generated
+/// config stays IPv4-only. Falls back to the original value if no IPv4 entry
+/// is found (shouldn't happen for ProtonVPN).
+fn ipv4_only_addresses(address: &str) -> String {
+    let ipv4: Vec<&str> = address
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty() && !p.contains(':'))
+        .collect();
+
+    if ipv4.is_empty() {
+        address.trim().to_string()
+    } else {
+        ipv4.join(", ")
+    }
+}
+
 /// ProtonVPN provider
 pub struct ProtonVpnProvider;
 
@@ -83,7 +101,11 @@ impl VpnProvider for ProtonVpnProvider {
     }
 
     fn generate_wg_config(&self, creds: &ProviderCredentials, server: &Server) -> String {
-        // Use IPv4 only to avoid issues on systems with IPv6 disabled
+        // Use IPv4 only to avoid issues on systems with IPv6 disabled.
+        // ProtonVPN ships dual-stack configs (e.g. "10.2.0.2/32, 2a07:b944::2:2/128");
+        // keep only the IPv4 part, otherwise wg-quick's `ip -6 address add` fails when
+        // IPv6 has been disabled before connecting.
+        let address = ipv4_only_addresses(&creds.address);
         format!(
             "[Interface]\n\
              PrivateKey = {}\n\
@@ -96,7 +118,7 @@ impl VpnProvider for ProtonVpnProvider {
              AllowedIPs = 0.0.0.0/0\n\
              PersistentKeepalive = 25\n",
             creds.private_key,
-            creds.address,
+            address,
             self.dns(),
             server.pubkey,
             server.ip,
@@ -199,5 +221,55 @@ DNS = 10.2.0.1
         assert!(config.contains("DNS = 10.2.0.1"));
         assert!(config.contains("PublicKey = serverPublicKey12345678901234567890123="));
         assert!(config.contains("Endpoint = 1.2.3.4:51820"));
+    }
+
+    #[test]
+    fn test_ipv4_only_addresses() {
+        // Dual-stack ProtonVPN address -> IPv4 only
+        assert_eq!(
+            ipv4_only_addresses("10.2.0.2/32, 2a07:b944::2:2/128"),
+            "10.2.0.2/32"
+        );
+        // Already IPv4 only -> unchanged
+        assert_eq!(ipv4_only_addresses("10.2.0.2/32"), "10.2.0.2/32");
+        // Multiple IPv4 entries preserved
+        assert_eq!(
+            ipv4_only_addresses("10.2.0.2/32, 10.3.0.2/32"),
+            "10.2.0.2/32, 10.3.0.2/32"
+        );
+        // No IPv4 entry -> fall back to original (trimmed)
+        assert_eq!(ipv4_only_addresses("2a07:b944::2:2/128"), "2a07:b944::2:2/128");
+    }
+
+    #[test]
+    fn test_generate_wg_config_strips_ipv6_address() {
+        let provider = ProtonVpnProvider::new();
+
+        let creds = ProviderCredentials {
+            private_key: "userPrivateKey123456789012345678901234=".to_string(),
+            address: "10.2.0.2/32, 2a07:b944::2:2/128".to_string(),
+            provider_name: "protonvpn".to_string(),
+        };
+
+        let server = Server {
+            id: "CH#242".to_string(),
+            name: "CH#242".to_string(),
+            country: "Switzerland".to_string(),
+            country_code: "CH".to_string(),
+            city: "Zurich".to_string(),
+            ip: "149.88.27.219".to_string(),
+            pubkey: "serverPublicKey12345678901234567890123=".to_string(),
+            features: Default::default(),
+            provider: "protonvpn".to_string(),
+            is_custom: false,
+            allowed_ips: "0.0.0.0/0".to_string(),
+        };
+
+        let config = provider.generate_wg_config(&creds, &server);
+
+        // IPv4 address kept, IPv6 dropped (would break wg-quick when IPv6 is disabled)
+        assert!(config.contains("Address = 10.2.0.2/32\n"));
+        assert!(!config.contains("2a07:b944"));
+        assert!(!config.contains("::"));
     }
 }
