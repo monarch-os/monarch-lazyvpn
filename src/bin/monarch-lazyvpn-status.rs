@@ -44,6 +44,10 @@ enum Format {
     Json,
 }
 
+/// nf-md-vpn. The single glyph every visible state uses; the class carries the
+/// state, so the bar colours one icon rather than swapping between several.
+const VPN_GLYPH: &str = "󰖂";
+
 /// Waybar custom module output
 #[derive(Serialize)]
 struct WaybarOutput {
@@ -206,7 +210,7 @@ fn read_status() -> Status {
     // No WireGuard interface active -> disconnected
     let active_interface = match active_interface {
         Some(iface) => iface,
-        None => return disconnected_status(),
+        None => return disconnected_status(state.as_ref()),
     };
 
     // We have an active interface - check if we have metadata from .connection_state
@@ -256,12 +260,13 @@ fn read_status() -> Status {
     // Build text and tooltip based on whether we have metadata
     // Text is just an icon, details go in tooltip
     let (text, tooltip) = if let Some(ref server) = server_name {
-        // We have metadata from monarch-lazyvpn
-        let text = if killswitch_active {
-            "󰦝".to_string()  // nf-md-shield_lock (locked shield)
-        } else {
-            "󰖂".to_string()  // nf-md-vpn (VPN icon)
-        };
+        // We have metadata from monarch-lazyvpn.
+        //
+        // One glyph for every visible state — the state is carried by the class
+        // (which the bar maps to a colour), never by a different icon. Swapping
+        // in a second glyph made the pill read as a different widget at a
+        // glance, and left no room for the states that actually matter.
+        let text = VPN_GLYPH.to_string();
 
         let mut tooltip_lines = vec![format!("Connected to {}", server)];
         if let Some(p) = provider {
@@ -286,7 +291,7 @@ fn read_status() -> Status {
         (text, tooltip_lines.join("\n"))
     } else {
         // No metadata - VPN established externally (Task 8)
-        let text = "󰖂".to_string();  // nf-md-vpn (VPN icon)
+        let text = VPN_GLYPH.to_string();
         let tooltip = format!(
             "WireGuard interface {} active\nIP: {}\nTraffic: ↓{} ↑{}",
             active_interface,
@@ -307,7 +312,11 @@ fn read_status() -> Status {
         split_tunnel,
         text,
         tooltip,
-        class: "connected".to_string(),
+        class: if killswitch_active {
+            "connected-ks".to_string()
+        } else {
+            "connected".to_string()
+        },
     }
 }
 
@@ -328,7 +337,47 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn disconnected_status() -> Status {
+/// Status with no WireGuard interface up.
+///
+/// Two very different situations hide behind "disconnected", and only one of
+/// them is worth a pill in the bar:
+///
+/// * the killswitch is still loaded — every packet is being dropped and the
+///   user is looking at a dead network with no idea why. That is the state the
+///   bar has to shout about, so it gets the VPN glyph and a `ks-blocking` class
+///   for the bar to colour as an alert.
+/// * nothing is running at all — normal, uninteresting, and it used to sit in
+///   the bar as a permanent unlocked padlock. It now returns empty text, which
+///   is how both Waybar and the Monarch bar plugin collapse a module.
+///
+/// The killswitch is a set of nft rules, and `nft list tables` needs root, so
+/// this binary — unprivileged, re-run every few seconds — cannot look at them
+/// directly. It reads the last state written by monarch-lazyvpn instead: the
+/// file outlives a tunnel that dropped unexpectedly and is only cleared when
+/// the app next starts (see cleanup::cleanup_connection_state), which is
+/// exactly the window where the rules are still loaded. That makes this an
+/// inference from the last known state rather than a live reading of nftables.
+fn disconnected_status(state: Option<&serde_json::Value>) -> Status {
+    let killswitch_active = state
+        .and_then(|s| s.get("killswitch_active"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if killswitch_active {
+        return Status {
+            connected: false,
+            server: None,
+            ip: None,
+            uptime: None,
+            interface: None,
+            killswitch_active: true,
+            split_tunnel: false,
+            text: VPN_GLYPH.to_string(),
+            tooltip: "VPN: Disconnected\nKillswitch: Active (blocking all traffic)".to_string(),
+            class: "ks-blocking".to_string(),
+        };
+    }
+
     Status {
         connected: false,
         server: None,
@@ -337,7 +386,7 @@ fn disconnected_status() -> Status {
         interface: None,
         killswitch_active: false,
         split_tunnel: false,
-        text: "󰌿".to_string(),  // nf-md-lock_open_outline (unlocked padlock)
+        text: String::new(),
         tooltip: "Not connected to VPN".to_string(),
         class: "disconnected".to_string(),
     }
