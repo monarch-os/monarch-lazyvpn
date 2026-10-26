@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LazyVPN
+Comment=Compact WireGuard VPN manager
+Exec=monarch-lazyvpn
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;
+StartupWMClass=monarch-lazyvpn
+Keywords=WireGuard;VPN;ProtonVPN;

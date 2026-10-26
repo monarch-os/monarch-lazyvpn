@@ -52,6 +52,7 @@ struct KeyfileCache {
 pub struct CredentialManager {
     use_fallback: bool,
     fallback_password: Option<String>,
+    password_prompt: Box<dyn Fn(&str) -> Result<String> + Send + Sync>,
 }
 
 impl CredentialManager {
@@ -61,6 +62,7 @@ impl CredentialManager {
         Self {
             use_fallback,
             fallback_password: None,
+            password_prompt: Box::new(Self::prompt_password),
         }
     }
 
@@ -272,6 +274,10 @@ impl CredentialManager {
         self.fallback_password = Some(password);
     }
 
+    pub fn set_password_prompt(&mut self, prompt: impl Fn(&str) -> Result<String> + Send + Sync + 'static) {
+        self.password_prompt = Box::new(prompt);
+    }
+
     /// Store credentials
     pub fn store(&mut self, provider: &str, credentials: &ProviderCredentials) -> Result<()> {
         let data = serde_json::to_string(credentials)?;
@@ -284,7 +290,7 @@ impl CredentialManager {
                 self.fallback_password = Some(cached.clone());
                 cached
             } else {
-                let pwd = Self::prompt_password("Enter encryption password for credentials: ")?;
+                let pwd = (self.password_prompt)("Enter encryption password for credentials: ")?;
                 self.fallback_password = Some(pwd.clone());
                 self.cache_password(&pwd)?;
                 pwd
@@ -336,7 +342,7 @@ impl CredentialManager {
                 self.fallback_password = Some(cached.clone());
                 cached
             } else {
-                let pwd = Self::prompt_password("Enter decryption password: ")?;
+                let pwd = (self.password_prompt)("Enter decryption password: ")?;
                 self.fallback_password = Some(pwd.clone());
                 self.cache_password(&pwd)?;
                 pwd

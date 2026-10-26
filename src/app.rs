@@ -9,7 +9,6 @@ use crate::system::firewall::{cleanup_orphaned_killswitch, Ipv6Protection, Kills
 use crate::system::keyring::{CredentialManager, ProviderCredentials};
 use crate::system::network::NetworkStats;
 use crate::system::wireguard::WgManager;
-use crate::tui::widgets::FilePicker;
 use crate::utils::gluetun::{get_servers, ServerCache};
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -22,9 +21,6 @@ const IP_VERIFY_RETRIES: u32 = 3;
 const IP_VERIFY_DELAY_MS: u64 = 2000;
 /// Global timeout for operations (90s = wg-quick 30s + nft 10s + margin)
 const OPERATION_TIMEOUT_SECS: u64 = 90;
-
-/// Spinner animation frames
-pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Validate a custom config name so it maps to a safe, single-segment filename
 fn is_valid_config_name(name: &str) -> bool {
@@ -137,8 +133,6 @@ pub struct App {
     /// Search filter
     pub search_filter: String,
 
-    /// Is in search mode
-    pub search_mode: bool,
 
     /// Active provider
     pub active_provider: Option<Box<dyn VpnProvider>>,
@@ -149,14 +143,6 @@ pub struct App {
     /// Current public IP
     pub current_public_ip: Option<String>,
 
-    /// Should quit
-    pub should_quit: bool,
-
-    /// Show help popup
-    pub show_help: bool,
-
-    /// File picker for importing configs
-    pub file_picker: FilePicker,
 
     /// Error message to display
     pub error_message: Option<String>,
@@ -164,8 +150,6 @@ pub struct App {
     /// Info message to display
     pub info_message: Option<String>,
 
-    /// Spinner frame index for animations
-    pub spinner_frame: usize,
 
     /// Pending operation result receiver
     pending_operation: Option<oneshot::Receiver<OperationResult>>,
@@ -182,11 +166,6 @@ pub struct App {
     /// Flag to request immediate IP refresh after connection
     pub needs_ip_refresh: bool,
 
-    /// Provider menu for adding new providers
-    pub provider_menu: crate::tui::widgets::ProviderMenu,
-
-    /// Provider being imported (set when file picker opens after provider selection)
-    pub pending_provider_import: Option<String>,
 
     /// Effective killswitch state for current connection (accounts for split-tunnel)
     pending_killswitch_enabled: bool,
@@ -230,23 +209,16 @@ impl App {
             server_cache: None,
             tree_state,
             search_filter: String::new(),
-            search_mode: false,
             active_provider: None,
             provider_credentials: None,
             current_public_ip: None,
-            should_quit: false,
-            show_help: false,
-            file_picker: FilePicker::new(),
             error_message: None,
             info_message: None,
-            spinner_frame: 0,
             pending_operation: None,
             operation_started_at: None,
             pending_refresh: None,
             is_refreshing: false,
             needs_ip_refresh: false,
-            provider_menu: crate::tui::widgets::ProviderMenu::new(),
-            pending_provider_import: None,
             pending_killswitch_enabled: false,
             pending_delete: None,
             rename_target: None,
@@ -298,7 +270,7 @@ impl App {
     }
 
     /// Select a server by its ID in the tree view
-    fn select_server_by_id(&mut self, server_id: &str) {
+    pub(crate) fn select_server_by_id(&mut self, server_id: &str) {
         // First, find the provider of this server and expand it
         let servers = self.get_servers();
         if let Some(server) = servers.iter().find(|s| s.id == server_id) {
@@ -1222,28 +1194,6 @@ impl App {
         }
     }
 
-    /// Start search mode
-    pub fn start_search(&mut self) {
-        self.search_mode = true;
-        self.search_filter.clear();
-    }
-
-    /// End search mode
-    pub fn end_search(&mut self) {
-        self.search_mode = false;
-    }
-
-    /// Add character to search
-    pub fn search_push(&mut self, c: char) {
-        self.search_filter.push(c);
-        self.tree_state.selected_index = 0;
-    }
-
-    /// Remove character from search
-    pub fn search_pop(&mut self) {
-        self.search_filter.pop();
-        self.tree_state.selected_index = 0;
-    }
 
     /// Clear messages
     pub fn clear_messages(&mut self) {
@@ -1256,15 +1206,6 @@ impl App {
         self.active_provider.is_some() && self.provider_credentials.is_some()
     }
 
-    /// Advance spinner animation frame
-    pub fn tick_spinner(&mut self) {
-        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
-    }
-
-    /// Get current spinner character
-    pub fn spinner_char(&self) -> &'static str {
-        SPINNER_FRAMES[self.spinner_frame]
-    }
 
     /// Check if app is busy (connecting/disconnecting, refreshing, or has pending operation)
     pub fn is_busy(&self) -> bool {
