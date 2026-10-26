@@ -459,6 +459,18 @@ impl ConnectionManager {
 
         if !writable {
             self.interface = persisted.interface;
+            if matches!(persisted.state, ConnectionState::Connecting | ConnectionState::Disconnecting)
+                && !crate::system::instance::owner_running().unwrap_or(true)
+            {
+                self.state = if interface_exists {
+                    let message = "VPN transition interrupted; interface still exists".to_string();
+                    self.last_error = Some(message.clone());
+                    ConnectionState::Error(message)
+                } else {
+                    ConnectionState::Disconnected
+                };
+                return Ok(());
+            }
             if let ConnectionState::Error(message) = &persisted.state {
                 self.last_error = Some(message.clone());
             }

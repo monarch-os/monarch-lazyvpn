@@ -21,7 +21,7 @@ impl Instance {
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", uid())));
-        Ok(base.join("monarch-lazyvpn"))
+        runtime_dir_in(&base, Path::new("/tmp"))
     }
 
     pub fn acquire(dir: &Path) -> anyhow::Result<Option<Self>> {
@@ -118,6 +118,37 @@ fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+fn runtime_dir_in(base: &Path, fallback: &Path) -> anyhow::Result<PathBuf> {
+    match fs::metadata(base) {
+        Ok(metadata) if metadata.is_dir() => Ok(base.join("monarch-lazyvpn")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(fallback.join(format!("monarch-lazyvpn-{}", uid())))
+        }
+        Err(error) => Err(error).context("Cannot inspect session runtime directory"),
+        Ok(_) => bail!("Session runtime path is not a directory"),
+    }
+}
+
+pub fn owner_running() -> anyhow::Result<bool> {
+    let path = Instance::runtime_dir()?.join("instance.lock");
+    let lock = match OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid() || metadata.nlink() != 1
+        || metadata.mode() & 0o077 != 0 {
+        bail!("Unsafe LazyVPN lock file");
+    }
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn is_legacy_instance(pid: u32) -> bool {
     if pid == std::process::id() {
         return false;
@@ -141,7 +172,9 @@ fn is_legacy_instance(pid: u32) -> bool {
 pub async fn open(gui: bool, preview: bool) -> anyhow::Result<Option<Instance>> {
     let mut dir = Instance::runtime_dir()?;
     if preview {
-        dir.set_file_name("monarch-lazyvpn-preview");
+        let mut name = dir.file_name().unwrap().to_os_string();
+        name.push("-preview");
+        dir.set_file_name(name);
     }
     for _ in 0..20 {
         if let Some(instance) = Instance::acquire(&dir)? {
@@ -249,6 +282,21 @@ async fn focus_window() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn missing_session_uses_a_private_per_user_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("run/user/1000");
+        let dir = runtime_dir_in(&missing, temp.path()).unwrap();
+        assert_eq!(dir, temp.path().join(format!("monarch-lazyvpn-{}", uid())));
+        let owner = Instance::acquire(&dir).unwrap().unwrap();
+        assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        assert!(Instance::acquire(&dir).unwrap().is_none());
+        assert!(!missing.exists());
+        drop(owner);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(Instance::acquire(&dir).is_err());
+    }
 
     #[test]
     fn simultaneous_launches_have_one_owner() {

@@ -73,6 +73,41 @@ fn busy_instance_blocks_reset_without_touching_configuration() {
 }
 
 #[test]
+fn status_normalizes_abandoned_transitions_without_writing() {
+    for (state, interface) in [
+        ("Connecting", "wg_test_missing"), ("Disconnecting", "wg_test_missing"),
+        ("Connecting", "lo"), ("Disconnecting", "lo"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config/monarch-lazyvpn");
+        std::fs::create_dir_all(&config).unwrap();
+        let path = config.join(".connection_state");
+        std::fs::write(&path, json!({
+            "state": state, "interface": interface, "pid": std::process::id(),
+            "was_connected_on_exit": false
+        }).to_string()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let runtime = temp.path().join("monarch-lazyvpn");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = std::fs::File::create(runtime.join("instance.lock")).unwrap();
+        lock.set_permissions(std::fs::Permissions::from_mode(0o600)).unwrap();
+        lock.lock_exclusive().unwrap();
+        let abandoned = if interface == "lo" { "error" } else { "disconnected" };
+        for (live, expected) in [(true, state.to_lowercase()), (false, abandoned.into())] {
+            if !live { FileExt::unlock(&lock).unwrap(); }
+            cargo_bin_cmd!("monarch-lazyvpn")
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env("XDG_RUNTIME_DIR", temp.path())
+                .args(["--format", "json", "status"])
+                .assert().success()
+                .stdout(predicates::str::contains(format!("\"status\": \"{expected}\"")));
+            assert_eq!(before, std::fs::read(&path).unwrap());
+        }
+    }
+}
+
+#[test]
 #[cfg(feature = "gui")]
 fn second_launch_requests_activation_before_initializing_vpn() {
     use std::io::{Read, Write};
