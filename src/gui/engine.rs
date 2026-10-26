@@ -5,7 +5,7 @@ use crate::core::{
   provider::{get_provider, ProviderType},
   server::Server,
 };
-use crate::system::{cleanup, network::NetworkStats};
+use crate::system::network::NetworkStats;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, watch};
 
@@ -192,7 +192,7 @@ async fn apply(app: &mut App, command: Command) -> anyhow::Result<()> {
       app.import_config(&path).await?;
       if let Some(provider) = app.active_provider.as_ref().map(|p| p.name().to_owned()) {
         if provider != "custom" {
-          app.add_configured_provider(&provider)?;
+          app.add_configured_provider(&provider).await?;
         }
       }
     }
@@ -264,10 +264,7 @@ async fn run(
   tx: &watch::Sender<Snapshot>,
   stopping: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
-  cleanup::create_pid_file()?;
-  let result = run_owned(&mut rx, tx, stopping).await;
-  cleanup::remove_pid_file()?;
-  result
+  run_owned(&mut rx, tx, stopping).await
 }
 
 async fn run_owned(
@@ -306,7 +303,7 @@ async fn run_owned(
       }
     }
   });
-  app.initialize().await?;
+  app.initialize_cached().await?;
   let mut servers = Arc::new(app.get_servers());
   tx.send_replace(snapshot(&app, servers.clone()));
   let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -374,6 +371,9 @@ async fn run_owned(
     if publish {
       tx.send_replace(snapshot(&app, servers.clone()));
       last_render = std::time::Instant::now();
+    }
+    if shutting_down {
+      app.cancel_refresh().await;
     }
     // Let an in-flight tunnel transition settle before applying the exit policy.
     if shutting_down && !app.is_busy() {

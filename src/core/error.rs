@@ -44,9 +44,6 @@ pub enum VpnError {
     #[error("Not connected")]
     NotConnected,
 
-    #[error("Another instance is running")]
-    InstanceAlreadyRunning,
-
     #[error("Encryption error: {0}")]
     EncryptionError(String),
 }

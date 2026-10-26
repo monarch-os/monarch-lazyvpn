@@ -6,9 +6,7 @@ use crate::core::server::Server;
 use crate::system::wireguard::WgManager;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -142,8 +140,16 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    /// Create a new connection manager
+    /// Requires the instance lock; use `snapshot` for read-only status.
     pub fn new(interface: &str) -> Result<Self> {
+        Self::load(interface, true)
+    }
+
+    pub fn snapshot(interface: &str) -> Result<Self> {
+        Self::load(interface, false)
+    }
+
+    fn load(interface: &str, writable: bool) -> Result<Self> {
         let config_dir = AppConfig::config_dir()?;
         let state_file = config_dir.join(".connection_state");
 
@@ -160,7 +166,7 @@ impl ConnectionManager {
         };
 
         // Try to recover state
-        manager.recover_state()?;
+        manager.recover_state(writable)?;
 
         Ok(manager)
     }
@@ -358,14 +364,7 @@ impl ConnectionManager {
 
         let content = serde_json::to_string_pretty(&persisted)?;
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&self.state_file)?;
-
-        file.write_all(content.as_bytes())?;
+        crate::utils::atomic_file::write(&self.state_file, content.as_bytes())?;
         debug!("Persisted connection state: {:?}", self.state);
 
         Ok(())
@@ -389,23 +388,12 @@ impl ConnectionManager {
         }
     }
 
-    /// Check if a process is running
-    fn is_pid_running(pid: u32) -> bool {
-        std::path::Path::new(&format!("/proc/{}", pid)).exists()
-    }
-
     /// Recover state on startup (detect orphaned/crashed state or restore preserved connection)
-    fn recover_state(&mut self) -> Result<()> {
+    fn recover_state(&mut self, writable: bool) -> Result<()> {
         let persisted = match self.load_state()? {
             Some(s) => s,
             None => return Ok(()),
         };
-
-        // Check if the process that created this state is still running
-        if Self::is_pid_running(persisted.pid) {
-            // Another instance is running
-            return Err(VpnError::InstanceAlreadyRunning);
-        }
 
         // Check if interface actually exists
         let interface_exists =
@@ -420,6 +408,8 @@ impl ConnectionManager {
             self.interface = persisted.interface;
             self.state = ConnectionState::Connected;
             self.connected_at = persisted.connected_at;
+            self.current_public_ip = persisted.public_ip;
+            self.killswitch_active = persisted.killswitch_active;
 
             // Restore server info if available
             if let (Some(server_id), Some(server_name)) =
@@ -443,7 +433,9 @@ impl ConnectionManager {
             }
 
             // Update PID in persisted state to current process
-            self.persist_state()?;
+            if writable {
+                self.persist_state()?;
+            }
 
             info!(
                 "VPN connection restored - connected since {:?}",
@@ -458,8 +450,31 @@ impl ConnectionManager {
                 "Previous VPN connection lost (interface {} no longer exists)",
                 persisted.interface
             );
-            self.remove_state_file();
+            if writable {
+                self.remove_state_file();
+            }
             self.state = ConnectionState::Disconnected;
+            return Ok(());
+        }
+
+        if !writable {
+            self.interface = persisted.interface;
+            if matches!(persisted.state, ConnectionState::Connecting | ConnectionState::Disconnecting)
+                && !crate::system::instance::owner_running().unwrap_or(true)
+            {
+                self.state = if interface_exists {
+                    let message = "VPN transition interrupted; interface still exists".to_string();
+                    self.last_error = Some(message.clone());
+                    ConnectionState::Error(message)
+                } else {
+                    ConnectionState::Disconnected
+                };
+                return Ok(());
+            }
+            if let ConnectionState::Error(message) = &persisted.state {
+                self.last_error = Some(message.clone());
+            }
+            self.state = persisted.state;
             return Ok(());
         }
 
@@ -636,7 +651,7 @@ impl ConnectionManager {
         match self.load_state() {
             Ok(Some(state)) => {
                 state.was_connected_on_exit
-                    && !Self::is_pid_running(state.pid)
+                    && !self.is_connected()
                     && matches!(
                         state.state,
                         ConnectionState::Connected | ConnectionState::Disconnected
@@ -967,6 +982,21 @@ mod tests {
         assert_eq!(loaded.interface, "wg_test");
         assert!(loaded.was_connected_on_exit); // Should be true because state is Connected
         assert_eq!(loaded.pid, std::process::id());
+
+        manager.recover_state(true).unwrap();
+        assert_eq!(manager.state(), &ConnectionState::Disconnected);
+        assert!(!state_file.exists());
+
+        manager.interface = "lo".to_string();
+        manager.state = ConnectionState::Connected;
+        manager.persist_state().unwrap();
+        manager.current_public_ip = None;
+        manager.killswitch_active = false;
+        manager.recover_state(true).unwrap();
+        assert_eq!(manager.state(), &ConnectionState::Connected);
+        let restored = manager.load_state().unwrap().unwrap();
+        assert_eq!(restored.public_ip.as_deref(), Some("203.0.113.99"));
+        assert!(restored.killswitch_active);
 
         // Cleanup
         let _ = std::fs::remove_file(&state_file);
