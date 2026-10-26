@@ -128,6 +128,10 @@ impl ServerCache {
 
     /// Check if we can attempt a new fetch (rate limiting)
     pub fn can_fetch(&self) -> bool {
+        // An interrupted first fetch must not leave an empty list locked out for five minutes.
+        if self.servers.is_empty() {
+            return true;
+        }
         let since_last = Utc::now() - self.metadata.last_fetch_attempt;
         since_last > Duration::seconds(MIN_FETCH_INTERVAL_SECS as i64)
     }
@@ -583,7 +587,9 @@ pub async fn get_servers(force_refresh: bool, providers: &[String]) -> Result<Se
         None => ServerCache::empty(),
     };
     previous.metadata.last_fetch_attempt = Utc::now();
-    previous.save()?;
+    if let Err(error) = previous.save() {
+        warn!("Could not persist server refresh attempt: {}", error);
+    }
     let fetcher = ServerFetcher::new();
     match fetcher.fetch(providers).await {
         Ok(cache) => Ok(cache),

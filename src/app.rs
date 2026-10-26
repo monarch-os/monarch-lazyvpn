@@ -1821,6 +1821,13 @@ mod tests {
         run_cache_scenario("local-only");
     }
 
+    #[test]
+    fn unwritable_cache_keeps_cli_profiles_available() {
+        if unsafe { libc::geteuid() } != 0 {
+            run_cache_scenario("read-only");
+        }
+    }
+
     fn run_cache_scenario(scenario: &str) {
         let temp = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1871,6 +1878,18 @@ mod tests {
         std::fs::write(local.join("local-test.conf"),
             "[Interface]\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=\nEndpoint = 192.0.2.2:51820\nAllowedIPs = 10.0.0.0/8\n").unwrap();
         let mut app = App::new().await.unwrap();
+        if scenario == "read-only" {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = AppConfig::cache_dir().unwrap();
+            let permissions = std::fs::metadata(&directory).unwrap().permissions();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+            assert!(cache.save().is_err());
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), app.refresh_servers(false, true)).await;
+            std::fs::set_permissions(&directory, permissions).unwrap();
+            result.unwrap().unwrap();
+            assert!(app.get_servers().iter().any(|s| s.id == "cached-server"));
+            return;
+        }
         tokio::time::timeout(std::time::Duration::from_millis(500), app.initialize_server_list())
             .await.expect("Cached profiles waited for network retries").unwrap();
         let servers = app.get_servers();
@@ -1904,12 +1923,26 @@ mod tests {
             app.initialize_server_list().await.unwrap();
             assert!(!app.is_refreshing);
         } else {
-            tokio::task::yield_now().await;
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if ServerCache::load().unwrap().is_some_and(|persisted|
+                        persisted.metadata.last_fetch_attempt > cache.metadata.last_fetch_attempt) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
             tokio::time::timeout(std::time::Duration::from_millis(500), app.cancel_refresh()).await.unwrap();
             assert!(!app.is_refreshing);
             assert!(!app.is_busy());
             assert!(app.pending_refresh.is_none());
             assert!(app.refresh_task.is_none());
+            if matches!(scenario.as_str(), "missing" | "corrupt") {
+                let mut reopened = App::new().await.unwrap();
+                reopened.initialize_server_list().await.unwrap();
+                assert!(reopened.is_refreshing, "An aborted empty-cache refresh must retry on reopening");
+                reopened.cancel_refresh().await;
+            }
         }
     }
 
