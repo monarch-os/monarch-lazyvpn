@@ -291,7 +291,10 @@ impl App {
             self.server_cache = Some(ServerCache::empty());
             return Ok(());
         }
-        let cached = ServerCache::load()?;
+        let cached = ServerCache::load().unwrap_or_else(|error| {
+            warn!("Could not read server cache at startup: {}", error);
+            None
+        });
         let needs_refresh = cached.as_ref().is_none_or(|cache| cache.needs_refresh(providers));
         let can_refresh = cached.as_ref().is_none_or(ServerCache::can_fetch);
         self.server_cache = Some(cached.unwrap_or_else(ServerCache::empty));
@@ -1818,6 +1821,8 @@ mod tests {
     fn missing_or_corrupt_cache_keeps_local_profiles_available() {
         run_cache_scenario("missing");
         run_cache_scenario("corrupt");
+        run_cache_scenario("invalid-utf8");
+        run_cache_scenario("unreadable");
         run_cache_scenario("local-only");
     }
 
@@ -1873,6 +1878,14 @@ mod tests {
         if scenario == "corrupt" {
             std::fs::write(AppConfig::cache_dir().unwrap().join("servers.json"), "{broken").unwrap();
         }
+        if scenario == "invalid-utf8" {
+            std::fs::write(AppConfig::cache_dir().unwrap().join("servers.json"), [0xff, 0xfe]).unwrap();
+        }
+        if scenario == "unreadable" {
+            let path = AppConfig::cache_dir().unwrap().join("servers.json");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(path).unwrap();
+        }
         let local = AppConfig::servers_dir().unwrap();
         std::fs::create_dir_all(&local).unwrap();
         std::fs::write(local.join("local-test.conf"),
@@ -1895,6 +1908,11 @@ mod tests {
         let servers = app.get_servers();
         assert!(servers.iter().any(|s| s.is_custom));
         assert!(!app.is_busy());
+        if matches!(scenario.as_str(), "invalid-utf8" | "unreadable") {
+            app.cancel_refresh().await;
+            assert!(app.get_servers().iter().any(|s| s.is_custom));
+            return;
+        }
         if matches!(scenario.as_str(), "stale" | "fresh" | "incomplete") {
             assert!(servers.iter().any(|s| s.id == "cached-server"));
         }
