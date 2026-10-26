@@ -667,7 +667,7 @@ impl VpnView {
             cx.notify();
           }));
         row = row.child(if let Some(path) = flag {
-          img(path)
+          img(assets::flag_image(path))
             .w(px(16.))
             .h(px(12.))
             .flex_shrink_0()

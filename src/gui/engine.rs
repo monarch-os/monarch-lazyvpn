@@ -192,7 +192,7 @@ async fn apply(app: &mut App, command: Command) -> anyhow::Result<()> {
       app.import_config(&path).await?;
       if let Some(provider) = app.active_provider.as_ref().map(|p| p.name().to_owned()) {
         if provider != "custom" {
-          app.add_configured_provider(&provider)?;
+          app.add_configured_provider(&provider).await?;
         }
       }
     }
@@ -303,7 +303,7 @@ async fn run_owned(
       }
     }
   });
-  app.initialize().await?;
+  app.initialize_cached().await?;
   let mut servers = Arc::new(app.get_servers());
   tx.send_replace(snapshot(&app, servers.clone()));
   let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -371,6 +371,9 @@ async fn run_owned(
     if publish {
       tx.send_replace(snapshot(&app, servers.clone()));
       last_render = std::time::Instant::now();
+    }
+    if shutting_down {
+      app.cancel_refresh().await;
     }
     // Let an in-flight tunnel transition settle before applying the exit policy.
     if shutting_down && !app.is_busy() {
