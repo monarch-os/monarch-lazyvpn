@@ -1,11 +1,11 @@
 # monarch-lazyvpn
 
-A TUI (Terminal User Interface) WireGuard VPN manager for Linux with multi-provider support.
+A native graphical WireGuard VPN manager for Linux, with headless CLI commands.
 
 ## Features
 
 - **Multi-provider support**: ProtonVPN, custom WireGuard configs
-- **TUI interface**: Navigate and connect with keyboard shortcuts
+- **GPUI interface**: Compact two-pane layout, embedded SVG flags, virtualized server list and keyboard navigation
 - **Killswitch**: nftables-based traffic blocking when VPN disconnects unexpectedly
 - **Split-tunnel detection**: Identifies configs that don't route all traffic
 - **Waybar integration**: Status output for i3/Sway status bars
@@ -21,7 +21,8 @@ cargo build --release
 ```
 
 Binaries are created at:
-- `target/release/monarch-lazyvpn` - Main TUI application
+- `target/release/monarch-lazyvpn` - Graphical application and CLI commands
+- `target/release/monarch-lazyvpn-gui` - Compatibility launcher for the graphical application
 - `target/release/monarch-lazyvpn-status` - Status binary for Waybar/scripts
 
 ### Setup permissions
@@ -33,6 +34,70 @@ sudo ./install/setup-permissions.sh install
 ```
 
 This allows VPN operations without repeated password prompts for users in the `wheel` or `sudo` group.
+
+### Graphical interface
+
+On Monarch, `monarch install lazyvpn` installs the package, the **Mod+Ctrl+V**
+shortcut, an 880 × 540 floating Niri window rule and the Noctalia palette template.
+The package owns the desktop launcher and template; Monarch owns the per-user
+integration. Existing installations are updated by `monarch reconcile` once
+LazyVPN 0.2.0 or newer is installed. Removing it through `monarch remove lazyvpn`
+keeps profiles and credentials.
+
+```bash
+cargo build --release --bin monarch-lazyvpn
+target/release/monarch-lazyvpn --preview
+target/release/monarch-lazyvpn
+```
+
+`--preview` uses in-memory sample profiles. It does not load credentials, write
+VPN settings, or run network/firewall operations. Without it, the GUI uses the
+existing configuration, credentials and connection engine. Only one
+interactive instance can run at a time.
+
+The GUI supports importing `.conf` files through the desktop file picker,
+connecting, switching and disconnecting, searching, favorites, provider groups,
+refreshing servers, and editing/renaming/deleting personal profiles. Custom-profile
+actions appear directly below Connect, with deletion highlighted in red. The editor
+validates WireGuard fields and keeps the stored private key when its replacement
+field is blank. Disconnect the selected profile before modifying it. ProtonVPN imports
+populate its server catalog; other WireGuard files remain personal profiles.
+Encrypted credential fallback prompts appear inside the window.
+
+Use `j`/`k` or Up/Down to select a server or provider category. Left/`h` folds
+the current category and keeps it selected; Right/`l` opens it, then enters its
+first server when pressed again. `Enter` toggles a category or connects/disconnects,
+`f` for favorites, `/` to focus search, `i` to import, `r` to refresh and `?` for
+help. Escape returns focus from the search field to the list. Mouse and Tab
+navigation are also supported.
+
+Protection preferences apply at connection time and are editable while
+disconnected. The active kill-switch state is displayed separately; split
+tunnels do not enable it. Closing the window respects `keep_vpn_on_exit` and
+waits for any pending transition to finish before shutting down the worker.
+
+To install the GUI and its desktop launcher for the current user:
+
+```bash
+bash install/setup-gui.sh
+```
+
+This installs into `~/.local/bin` (which must be on your launcher PATH). On
+Noctalia systems it also registers the data-only template in
+`assets/noctalia/lazyvpn.json`, through a dedicated `noctalia/lazyvpn.toml`
+overlay. Noctalia generates `~/.config/monarch-lazyvpn/theme.json`; the GUI
+reloads it live, including dark/light changes. XDG config/data directories are
+honored. Without a generated palette, the GUI uses the Monarch dark palette.
+An existing Noctalia overlay is backed up as `lazyvpn.toml.bak`.
+
+Build requirements include a current Rust toolchain and the GPUI Linux
+dependencies (`wayland`, `libxkbcommon`, `libxkbcommon-x11`, `libxcb`,
+`fontconfig`, `freetype2`, OpenSSL and a working graphics driver). Native file
+selection uses the desktop portal. The default build includes GPUI through the
+`gui` feature. `cargo build --release --no-default-features` builds only the
+headless CLI and status binary; it has no interactive terminal interface.
+
+GUI-focused checks: `cargo test --features gui --lib gui::`.
 
 ## Usage
 
@@ -48,17 +113,33 @@ monarch-lazyvpn
 |-----|--------|
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
-| `Enter` / `l` | Connect to server / Expand provider |
-| `h` | Collapse provider |
+| `Enter` | Connect/disconnect or toggle category |
+| `l` / `→` | Expand category or enter its first server |
+| `h` / `←` | Collapse category |
 | `d` | Disconnect |
 | `r` | Refresh server list |
-| `K` | Toggle killswitch |
 | `f` | Toggle favorite |
 | `/` | Search |
 | `i` | Import config |
-| `R` | Rename custom config |
-| `x` / `Del` | Delete custom config |
+| `?` | Show keyboard help |
+| `Esc` | Close dialog or return focus to the list |
 | `q` | Quit |
+
+Custom profiles have visible Edit, Rename and Delete buttons. Protection
+preferences are available in the right panel.
+
+### Headless CLI
+
+Subcommands do not open a window and work without a graphical session:
+
+```bash
+monarch-lazyvpn status --help
+monarch-lazyvpn --format json status
+monarch-lazyvpn list-servers --country FR
+monarch-lazyvpn import profile.conf
+monarch-lazyvpn connect SERVER_ID
+monarch-lazyvpn disconnect
+```
 
 ### Status binary
 
@@ -107,9 +188,6 @@ killswitch_allow_lan = true
 # Keep VPN running on exit (don't disconnect)
 keep_vpn_on_exit = true
 
-# Server list display mode: "all", "favorites", "country"
-server_list_mode = "all"
-
 # Favorite servers
 favorites = ["server-id-1", "server-id-2"]
 
@@ -123,22 +201,20 @@ configured_providers = ["protonvpn", "custom"]
 
 1. Launch `monarch-lazyvpn`
 2. Press `i` to import
-3. Select "ProtonVPN"
-4. Paste your WireGuard private key (from ProtonVPN account settings)
+3. Choose a WireGuard `.conf` file downloaded from your ProtonVPN account
+4. Confirm the import; the provider is detected automatically
 
 ### Custom WireGuard configs
 
 1. Press `i` to import
-2. Select "Custom Config"
-3. Navigate to your `.conf` file
-
-Or manually place `.conf` files in `~/.config/monarch-lazyvpn/servers/`
+2. Choose your `.conf` file
+3. Confirm the import; private keys are stored separately from the profile
 
 #### Renaming a custom config
 
 1. Select the custom config in the server list
-2. Press `R`
-3. Edit the name and press `Enter` (`Esc` to cancel)
+2. Click **Rename** below the connection button
+3. Edit the name and click **Confirm** (`Esc` to cancel)
 
 This renames the stored config file and moves its credentials and favorite entry
 to the new name. You cannot rename a config while connected to it — disconnect first.
@@ -146,8 +222,8 @@ to the new name. You cannot rename a config while connected to it — disconnect
 #### Deleting a custom config
 
 1. Select the custom config in the server list
-2. Press `x` (or `Del`)
-3. Confirm with `y`
+2. Click **Delete** below the connection button
+3. Click **Confirm** in the confirmation panel
 
 This removes the stored config file, its credentials from the keyring, and any
 favorite entry. You cannot delete a config while connected to it — disconnect first.
@@ -170,10 +246,11 @@ monarch-lazyvpn/
 │   │   ├── firewall.rs      # nftables killswitch
 │   │   ├── keyring.rs       # Credential storage
 │   │   └── network.rs       # Network statistics
-│   ├── tui/
-│   │   ├── ui.rs            # UI rendering
-│   │   ├── events.rs        # Keyboard event handling
-│   │   └── widgets/         # UI components
+│   ├── gui/
+│   │   ├── view.rs          # GPUI rendering and keyboard navigation
+│   │   ├── engine.rs        # Background VPN worker
+│   │   ├── editor.rs        # Custom-profile validation and persistence
+│   │   └── theme.rs         # Live Noctalia palette
 │   ├── utils/
 │   │   └── gluetun.rs       # Server list fetching
 │   └── bin/
@@ -189,7 +266,7 @@ monarch-lazyvpn/
 - Linux with WireGuard support
 - `wg-quick` (wireguard-tools)
 - `nft` (nftables) for killswitch
-- Rust 1.70+ (for building)
+- A current Rust toolchain and the GPUI dependencies listed above
 
 ## License
 

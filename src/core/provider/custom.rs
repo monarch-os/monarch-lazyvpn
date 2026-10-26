@@ -145,7 +145,7 @@ impl CustomProvider {
         let ip = config
             .endpoint
             .as_ref()
-            .and_then(|e| e.split(':').next())
+            .and_then(|e| e.rsplit_once(':').map(|(host, _)| host))
             .ok_or_else(|| VpnError::ConfigParseError("Missing Endpoint in config".to_string()))?
             .to_string();
 

@@ -1,21 +1,17 @@
-//! monarch-lazyvpn - TUI WireGuard multi-provider VPN manager
+//! Graphical WireGuard manager with headless CLI commands.
 
-mod app;
-mod core;
-mod system;
-mod tui;
-mod utils;
+use monarch_lazyvpn::{app, core, system};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tracing::{error, info, Level};
+use tracing::{info, Level};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 // Global guard to keep logging active for the lifetime of the program
 static LOG_GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
 
-/// TUI WireGuard multi-provider VPN manager
+/// Graphical WireGuard multi-provider VPN manager
 #[derive(Parser)]
 #[command(name = "monarch-lazyvpn")]
 #[command(author, version, about, long_about = None)]
@@ -23,6 +19,10 @@ struct Cli {
     /// Run in debug mode
     #[arg(short, long)]
     debug: bool,
+
+    /// Show sample profiles without changing the system
+    #[arg(long)]
+    preview: bool,
 
     /// Output format (for CLI commands)
     #[arg(long, value_enum, default_value = "text")]
@@ -69,15 +69,14 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    anyhow::ensure!(!cli.preview || cli.command.is_none(), "--preview cannot be combined with a CLI command");
 
     // Setup logging
     let log_level = if cli.debug { Level::DEBUG } else { Level::INFO };
 
-    // Only log to file in TUI mode
-    if cli.command.is_none() {
+    if cli.command.is_none() && !cli.preview {
         setup_file_logging(log_level)?;
     } else {
         // CLI mode: minimal logging to stderr
@@ -89,60 +88,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Handle CLI commands (headless mode)
     if let Some(command) = cli.command {
-        return run_cli_command(command, cli.format).await;
+        return tokio::runtime::Runtime::new()?.block_on(run_cli_command(command, cli.format));
     }
 
-    // TUI mode
-    info!("Starting monarch-lazyvpn TUI...");
-
-    // Create PID file
-    system::cleanup::create_pid_file()?;
-
-    // Setup signal handlers for graceful shutdown
-    // Handle SIGINT (Ctrl+C), SIGTERM (kill), and SIGHUP (terminal closed/Alt+F4)
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-
-    // Create channel to forward shutdown signals to TUI
-    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<&'static str>(1);
-
-    // Spawn signal handler task
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = sigint.recv() => {
-                info!("Received SIGINT (Ctrl+C)");
-                let _ = shutdown_tx_clone.send("SIGINT").await;
-            }
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM");
-                let _ = shutdown_tx_clone.send("SIGTERM").await;
-            }
-            _ = sighup.recv() => {
-                info!("Received SIGHUP (terminal closed)");
-                let _ = shutdown_tx_clone.send("SIGHUP").await;
-            }
-        }
-    });
-
-    // Run cleanup before starting
-    system::cleanup::cleanup_orphaned_state().await?;
-
-    // Create and run TUI
-    let mut tui_app = tui::TuiApp::new(shutdown_rx).await?;
-
-    // Run TUI - it will handle shutdown signals internally
-    if let Err(e) = tui_app.run().await {
-        error!("TUI error: {}", e);
-    }
-
-    // Cleanup
-    tui::restore()?;
-    system::cleanup::remove_pid_file()?;
-
-    info!("Goodbye!");
-    Ok(())
+    #[cfg(feature = "gui")]
+    { monarch_lazyvpn::gui::launch(cli.preview) }
+    #[cfg(not(feature = "gui"))]
+    { anyhow::bail!("This headless build requires a CLI command. Rebuild with the gui feature to open the window.") }
 }
 
 /// Setup file logging with size-based rotation (5MB, keep 3 files, gzip compression)

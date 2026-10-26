@@ -1,8 +1,9 @@
 [package]
 name = "monarch-lazyvpn"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "TUI WireGuard multi-provider VPN manager"
+description = "Native graphical WireGuard multi-provider VPN manager"
+default-run = "monarch-lazyvpn"
 authors = ["y0no"]
 license = "MIT"
 
@@ -14,10 +15,20 @@ path = "src/main.rs"
 name = "monarch-lazyvpn-status"
 path = "src/bin/monarch-lazyvpn-status.rs"
 
+[[bin]]
+name = "monarch-lazyvpn-gui"
+path = "src/bin/monarch-lazyvpn-gui.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:gpui-kit", "dep:gpui-omarchy", "dep:rust-embed", "dep:tempfile"]
+
 [dependencies]
-# TUI
-ratatui = "0.26"
-crossterm = { version = "0.27", features = ["event-stream"] }
+tempfile = { version = "3", optional = true }
+gpui-kit = { version = "=0.6.6", default-features = false, features = ["assets"], optional = true }
+gpui-omarchy = { version = "=0.1.3", optional = true }
+rust-embed = { version = "8", optional = true }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -79,8 +90,6 @@ base64 = "0.22"
 libc = "0.2"
 dirs = "6.0.0"
 
-# Unicode width calculation for proper emoji display
-unicode-width = "0.1"
 indexmap = "2.13.0"
 
 [dev-dependencies]
@@ -88,3 +97,6 @@ mockall = "0.12"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+[profile.release.package.gpui-pre-macros]
+debug-assertions = true
