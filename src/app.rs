@@ -159,6 +159,8 @@ pub struct App {
 
     /// Pending refresh result receiver (separate from main operations)
     pending_refresh: Option<oneshot::Receiver<std::result::Result<ServerCache, String>>>,
+    refresh_task: Option<tokio::task::JoinHandle<()>>,
+    refresh_in_background: bool,
 
     /// Refreshing flag
     pub is_refreshing: bool,
@@ -217,6 +219,8 @@ impl App {
             pending_operation: None,
             operation_started_at: None,
             pending_refresh: None,
+            refresh_task: None,
+            refresh_in_background: false,
             is_refreshing: false,
             needs_ip_refresh: false,
             pending_killswitch_enabled: false,
@@ -228,6 +232,14 @@ impl App {
 
     /// Initialize application (load cache, cleanup, etc.)
     pub async fn initialize(&mut self) -> Result<()> {
+        self.initialize_with_cache(false).await
+    }
+
+    pub async fn initialize_cached(&mut self) -> Result<()> {
+        self.initialize_with_cache(true).await
+    }
+
+    async fn initialize_with_cache(&mut self, cached: bool) -> Result<()> {
         // Use system detection to recover VPN state (async)
         // This replaces the sync recover_state from ConnectionManager::new()
         let detection_message = self.connection.recover_state_with_detection().await?;
@@ -240,7 +252,11 @@ impl App {
         }
 
         // Load server cache
-        self.refresh_servers(false, true).await?; // silent on startup
+        if cached {
+            self.initialize_server_list().await?;
+        } else {
+            self.refresh_servers(false, true).await?;
+        }
 
         // Try to load existing provider credentials
         self.load_provider_credentials()?;
@@ -266,6 +282,28 @@ impl App {
             }
         }
 
+        Ok(())
+    }
+
+    async fn initialize_server_list(&mut self) -> Result<()> {
+        let providers = &self.config.configured_providers;
+        if providers.is_empty() {
+            self.server_cache = Some(ServerCache::empty());
+            return Ok(());
+        }
+        let cached = ServerCache::load()?;
+        let needs_refresh = cached.as_ref().is_none_or(|cache| cache.needs_refresh(providers));
+        let can_refresh = cached.as_ref().is_none_or(ServerCache::can_fetch);
+        self.server_cache = Some(cached.unwrap_or_else(ServerCache::empty));
+        if let Some(cache) = &mut self.server_cache {
+            cache.servers.retain(|server| providers.contains(&server.provider));
+        }
+        if needs_refresh && can_refresh {
+            self.spawn_refresh(true)?;
+            self.info_message = Some("Showing saved profiles; updating server list in background…".into());
+        } else if needs_refresh {
+            self.info_message = Some("Showing saved profiles; server refresh is temporarily rate-limited".into());
+        }
         Ok(())
     }
 
@@ -388,6 +426,7 @@ impl App {
     /// Refresh server list
     /// If `silent` is true, don't show info_message (used during startup)
     pub async fn refresh_servers(&mut self, force: bool, silent: bool) -> Result<()> {
+        self.cancel_refresh().await;
         // If no providers configured, don't fetch from gluetun
         if !self.config.has_configured_providers() {
             info!("No providers configured, skipping server fetch");
@@ -431,7 +470,8 @@ impl App {
     }
 
     /// Add a configured provider and start async server refresh
-    pub fn add_configured_provider(&mut self, provider: &str) -> Result<()> {
+    pub async fn add_configured_provider(&mut self, provider: &str) -> Result<()> {
+        self.cancel_refresh().await;
         self.config.add_provider(provider);
         self.config.save()?;
         info!("Added provider: {}", provider);
@@ -1091,6 +1131,7 @@ impl App {
 
     /// Graceful shutdown - disconnects VPN (legacy behavior when keep_vpn_on_exit is false)
     pub async fn shutdown(&mut self) -> Result<()> {
+        self.cancel_refresh().await;
         info!("Shutting down...");
 
         if self.connection.is_connected() {
@@ -1105,6 +1146,7 @@ impl App {
     /// Called when keep_vpn_on_exit is true (default)
     /// Persists connection state without tearing down the WireGuard interface
     pub async fn shutdown_preserving_vpn(&mut self) -> Result<()> {
+        self.cancel_refresh().await;
         info!("Shutting down (preserving VPN connection)...");
 
         if self.connection.is_connected() {
@@ -1210,7 +1252,7 @@ impl App {
     /// Check if app is busy (connecting/disconnecting, refreshing, or has pending operation)
     pub fn is_busy(&self) -> bool {
         self.pending_operation.is_some()
-            || self.is_refreshing
+            || (self.is_refreshing && !self.refresh_in_background)
             || matches!(
                 self.connection.state(),
                 ConnectionState::Connecting | ConnectionState::Disconnecting
@@ -1305,18 +1347,22 @@ impl App {
 
     /// Start refresh operation in background (non-blocking)
     pub fn start_refresh(&mut self) -> Result<()> {
+        self.spawn_refresh(false)
+    }
+
+    fn spawn_refresh(&mut self, background: bool) -> Result<()> {
         if self.is_refreshing {
-            return Err(VpnError::ConnectionError("Refresh already in progress".into()));
+            return Ok(());
         }
 
         self.is_refreshing = true;
-
+        self.refresh_in_background = background;
 
         let (tx, rx) = oneshot::channel();
         self.pending_refresh = Some(rx);
 
         let providers = self.config.configured_providers.clone();
-        tokio::spawn(async move {
+        self.refresh_task = Some(tokio::spawn(async move {
             info!("Background refresh started");
             let result = match get_servers(true, &providers).await {
                 Ok(cache) => {
@@ -1330,9 +1376,19 @@ impl App {
                 }
             };
             let _ = tx.send(result);
-        });
+        }));
 
         Ok(())
+    }
+
+    pub async fn cancel_refresh(&mut self) {
+        if let Some(task) = self.refresh_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.pending_refresh = None;
+        self.is_refreshing = false;
+        self.refresh_in_background = false;
     }
 
     /// Check for pending refresh results (non-blocking)
@@ -1341,6 +1397,8 @@ impl App {
             match rx.try_recv() {
                 Ok(result) => {
                     self.is_refreshing = false;
+                    self.refresh_in_background = false;
+                    self.refresh_task = None;
                     self.pending_refresh = None;
                     match result {
                         Ok(cache) => {
@@ -1358,6 +1416,7 @@ impl App {
                             self.info_message = Some(format!("Loaded {} servers", count));
                         }
                         Err(e) => {
+                            self.info_message = None;
                             self.error_message = Some(format!("Refresh failed: {}", e));
                         }
                     }
@@ -1367,6 +1426,9 @@ impl App {
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.is_refreshing = false;
+                    self.refresh_in_background = false;
+                    self.refresh_task = None;
+                    self.info_message = None;
                     self.pending_refresh = None;
                     self.error_message = Some("Refresh failed unexpectedly".to_string());
                 }
@@ -1735,7 +1797,121 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::is_valid_config_name;
+    use super::*;
+
+    #[test]
+    fn stale_cache_is_available_without_waiting_for_network() {
+        run_cache_scenario("stale");
+    }
+
+    #[test]
+    fn fresh_cache_needs_no_background_request() {
+        run_cache_scenario("fresh");
+    }
+
+    #[test]
+    fn incomplete_cache_refreshes_without_blocking_and_can_be_cancelled() {
+        run_cache_scenario("incomplete");
+    }
+
+    #[test]
+    fn missing_or_corrupt_cache_keeps_local_profiles_available() {
+        run_cache_scenario("missing");
+        run_cache_scenario("corrupt");
+        run_cache_scenario("local-only");
+    }
+
+    fn run_cache_scenario(scenario: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "app::tests::cached_startup_child", "--nocapture"])
+            .env("LAZYVPN_CACHE_TEST", scenario)
+            .env("XDG_CONFIG_HOME", temp.path())
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/lazyvpn-test-bus")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("NO_PROXY", "")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[tokio::test]
+    async fn cached_startup_child() {
+        let Ok(scenario) = std::env::var("LAZYVPN_CACHE_TEST") else { return; };
+        let mut config = AppConfig::default();
+        config.configured_providers = vec!["protonvpn".into()];
+        if scenario == "incomplete" {
+            config.configured_providers.push("mullvad".into());
+        } else if scenario == "local-only" {
+            config.configured_providers.clear();
+        }
+        config.save().unwrap();
+        let mut cache = ServerCache::empty();
+        cache.metadata.fetched_at = chrono::Utc::now() - chrono::Duration::days(10);
+        cache.metadata.last_fetch_attempt = cache.metadata.fetched_at;
+        if matches!(scenario.as_str(), "fresh" | "incomplete") {
+            cache.metadata.fetched_at = chrono::Utc::now();
+        }
+        cache.servers.push(Server {
+            id: "cached-server".into(), name: "Cached server".into(),
+            country: "France".into(), country_code: "FR".into(), city: "Paris".into(),
+            ip: "192.0.2.1".into(), pubkey: String::new(), provider: "protonvpn".into(),
+            features: Default::default(), is_custom: false, allowed_ips: "0.0.0.0/0".into(),
+        });
+        if scenario != "missing" {
+            cache.save().unwrap();
+        }
+        if scenario == "corrupt" {
+            std::fs::write(AppConfig::cache_dir().unwrap().join("servers.json"), "{broken").unwrap();
+        }
+        let local = AppConfig::servers_dir().unwrap();
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("local-test.conf"),
+            "[Interface]\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=\nEndpoint = 192.0.2.2:51820\nAllowedIPs = 10.0.0.0/8\n").unwrap();
+        let mut app = App::new().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(500), app.initialize_server_list())
+            .await.expect("Cached profiles waited for network retries").unwrap();
+        let servers = app.get_servers();
+        assert!(servers.iter().any(|s| s.is_custom));
+        assert!(!app.is_busy());
+        if matches!(scenario.as_str(), "stale" | "fresh" | "incomplete") {
+            assert!(servers.iter().any(|s| s.id == "cached-server"));
+        }
+        if matches!(scenario.as_str(), "fresh" | "local-only") {
+            assert!(!app.is_refreshing);
+            assert!(app.refresh_task.is_none());
+            return;
+        }
+        assert!(app.is_refreshing);
+        let task_id = app.refresh_task.as_ref().unwrap().id();
+        app.start_refresh().unwrap();
+        assert_eq!(app.refresh_task.as_ref().unwrap().id(), task_id);
+        assert!(!app.is_busy());
+        if scenario == "stale" {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while app.is_refreshing {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    app.check_pending_refresh();
+                }
+            }).await.unwrap();
+            assert!(app.error_message.as_deref().unwrap().contains("Refresh failed"));
+            assert!(app.get_servers().iter().any(|s| s.id == "cached-server"));
+            let persisted = ServerCache::load().unwrap().unwrap();
+            assert_eq!(persisted.metadata.fetched_at, cache.metadata.fetched_at);
+            assert!(!persisted.can_fetch());
+            app.initialize_server_list().await.unwrap();
+            assert!(!app.is_refreshing);
+        } else {
+            tokio::task::yield_now().await;
+            tokio::time::timeout(std::time::Duration::from_millis(500), app.cancel_refresh()).await.unwrap();
+            assert!(!app.is_refreshing);
+            assert!(!app.is_busy());
+            assert!(app.pending_refresh.is_none());
+            assert!(app.refresh_task.is_none());
+        }
+    }
 
     #[test]
     fn test_valid_config_names() {

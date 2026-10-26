@@ -80,6 +80,13 @@ field is blank. Disconnect the selected profile before modifying it. ProtonVPN i
 populate its server catalog; other WireGuard files remain personal profiles.
 Encrypted credential fallback prompts appear inside the window.
 
+At startup, the GUI displays saved servers and local profiles immediately.
+Expired or incomplete server lists refresh in the background; cached profiles
+remain usable if the network is unavailable. A failed update keeps the previous
+list and reports the error. Closing the window cancels the refresh, and repeated
+refresh requests share the current task. CLI commands still wait for their
+server list before returning.
+
 Use `j`/`k` or Up/Down to select a server or provider category. Left/`h` folds
 the current category and keeps it selected; Right/`l` opens it, then enters its
 first server when pressed again. `Enter` toggles a category or connects/disconnects,

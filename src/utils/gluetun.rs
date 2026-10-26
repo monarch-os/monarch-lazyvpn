@@ -21,7 +21,6 @@ use tracing::{debug, info, warn};
 const GLUETUN_SERVERS_BASE_URL: &str =
     "https://raw.githubusercontent.com/qdm12/gluetun-servers/main/pkg/servers";
 const CACHE_EXPIRY_HOURS: i64 = 24;
-const CACHE_MAX_AGE_DAYS: i64 = 7;
 const MIN_FETCH_INTERVAL_SECS: u64 = 300; // 5 minutes
 const FETCH_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: u32 = 3;
@@ -104,15 +103,20 @@ impl ServerCache {
         }
 
         let content = fs::read_to_string(&path)?;
-        let cache: ServerCache = serde_json::from_str(&content)?;
-        Ok(Some(cache))
+        match serde_json::from_str(&content) {
+            Ok(cache) => Ok(Some(cache)),
+            Err(error) => {
+                warn!("Ignoring unreadable server cache: {}", error);
+                Ok(None)
+            }
+        }
     }
 
     /// Save cache to disk
     pub fn save(&self) -> Result<()> {
         let path = Self::cache_path()?;
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
+        crate::utils::atomic_file::write(&path, content.as_bytes())?;
         Ok(())
     }
 
@@ -120,12 +124,6 @@ impl ServerCache {
     pub fn is_expired(&self) -> bool {
         let age = Utc::now() - self.metadata.fetched_at;
         age > Duration::hours(CACHE_EXPIRY_HOURS)
-    }
-
-    /// Check if cache is stale (>7 days)
-    pub fn is_stale(&self) -> bool {
-        let age = Utc::now() - self.metadata.fetched_at;
-        age > Duration::days(CACHE_MAX_AGE_DAYS)
     }
 
     /// Check if we can attempt a new fetch (rate limiting)
@@ -152,6 +150,10 @@ impl ServerCache {
                 .any(|s| s.provider.eq_ignore_ascii_case(p))
         })
     }
+
+    pub fn needs_refresh(&self, providers: &[String]) -> bool {
+        self.is_expired() || !self.has_all_providers(providers)
+    }
 }
 
 /// Server fetcher with retry and caching
@@ -161,8 +163,15 @@ pub struct ServerFetcher {
 
 impl ServerFetcher {
     pub fn new() -> Self {
+        Self::with_timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+    }
+
+    fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .expect("HTTP client configuration is valid"),
         }
     }
 
@@ -248,10 +257,13 @@ impl ServerFetcher {
     /// Fetch and parse a single provider's server file.
     async fn fetch_provider(&self, provider: &str) -> Result<Vec<Server>> {
         let url = format!("{}/{}.json", GLUETUN_SERVERS_BASE_URL, provider);
+        self.fetch_provider_from(provider, &url).await
+    }
 
+    async fn fetch_provider_from(&self, provider: &str, url: &str) -> Result<Vec<Server>> {
         let response = timeout(
             std::time::Duration::from_secs(FETCH_TIMEOUT_SECS),
-            self.client.get(&url).send(),
+            self.client.get(url).send(),
         )
         .await
         .map_err(|_| {
@@ -553,69 +565,59 @@ impl Default for ServerFetcher {
 
 /// Get servers for the given providers, using cache if available and valid
 pub async fn get_servers(force_refresh: bool, providers: &[String]) -> Result<ServerCache> {
-    let cache = ServerCache::load()?;
-
-    if let Some(mut cache) = cache {
-        // A newly configured provider may not be present in an otherwise-fresh
-        // cache; in that case we still want to fetch (subject to rate limiting).
-        let missing_provider = !cache.has_all_providers(providers);
-
-        if force_refresh {
+    if providers.is_empty() {
+        return Ok(ServerCache::empty());
+    }
+    let mut previous = match ServerCache::load()? {
+        Some(cache) => {
+            if !force_refresh && !cache.needs_refresh(providers) {
+                debug!("Using cached server list");
+                return Ok(cache);
+            }
             if !cache.can_fetch() {
                 warn!("Rate limited: please wait before refreshing again");
                 return Ok(cache);
             }
-        } else if cache.is_stale() {
-            warn!(
-                "Server cache is older than {} days - refresh recommended",
-                CACHE_MAX_AGE_DAYS
-            );
-            // Still return cache but warn
-            if cache.can_fetch() {
-                // Try to refresh in background
-                match ServerFetcher::new().fetch(providers).await {
-                    Ok(new_cache) => return Ok(new_cache),
-                    Err(e) => {
-                        warn!("Failed to refresh cache: {}. Using stale cache.", e);
-                        return Ok(cache);
-                    }
-                }
-            }
-            return Ok(cache);
-        } else if !cache.is_expired() && !missing_provider {
-            debug!("Using cached server list");
-            return Ok(cache);
-        } else if missing_provider && !cache.can_fetch() {
-            // Cache lacks a configured provider but we are rate limited:
-            // return what we have rather than failing.
-            warn!("Cache is missing some configured providers but a refresh is rate limited");
-            return Ok(cache);
+            cache
         }
-
-        // Update last fetch attempt time
-        cache.metadata.last_fetch_attempt = Utc::now();
-        let _ = cache.save();
-    }
-
-    // Fetch new data
+        None => ServerCache::empty(),
+    };
+    previous.metadata.last_fetch_attempt = Utc::now();
+    previous.save()?;
     let fetcher = ServerFetcher::new();
     match fetcher.fetch(providers).await {
         Ok(cache) => Ok(cache),
-        Err(e) => {
-            // If we have old cache, use it
-            if let Ok(Some(old_cache)) = ServerCache::load() {
-                warn!("Fetch failed: {}. Using cached data.", e);
-                Ok(old_cache)
-            } else {
-                Err(e)
-            }
+        Err(e) if !force_refresh && !previous.servers.is_empty() => {
+            warn!("Fetch failed: {}. Using cached data.", e);
+            Ok(previous)
         }
+        Err(e) => Err(e),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn request_timeout_covers_a_stalled_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/servers.json", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let fetcher = ServerFetcher::with_timeout(std::time::Duration::from_millis(200));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            fetcher.fetch_provider_from("protonvpn", &url)).await;
+        server.abort();
+        let error = result.expect("Body read exceeded the request timeout").unwrap_err();
+        assert!(error.to_string().contains("JSON parse failed"), "{error}");
+    }
 
     #[test]
     fn test_country_to_code() {
