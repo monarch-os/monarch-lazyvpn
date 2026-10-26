@@ -76,9 +76,7 @@ fn main() -> anyhow::Result<()> {
     // Setup logging
     let log_level = if cli.debug { Level::DEBUG } else { Level::INFO };
 
-    if cli.command.is_none() && !cli.preview {
-        setup_file_logging(log_level)?;
-    } else {
+    if cli.command.is_some() || cli.preview {
         // CLI mode: minimal logging to stderr
         tracing_subscriber::registry()
             .with(fmt::layer().with_writer(std::io::stderr))
@@ -92,7 +90,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     #[cfg(feature = "gui")]
-    { monarch_lazyvpn::gui::launch(cli.preview) }
+    {
+        monarch_lazyvpn::gui::launch(cli.preview, || {
+            if !cli.preview {
+                setup_file_logging(log_level)?;
+            }
+            Ok(())
+        })
+    }
     #[cfg(not(feature = "gui"))]
     { anyhow::bail!("This headless build requires a CLI command. Rebuild with the gui feature to open the window.") }
 }
@@ -194,10 +199,25 @@ async fn run_cli_command(command: Commands, format: OutputFormat) -> anyhow::Res
     use core::connection::ConnectionState;
     use serde_json::json;
 
+    let _instance = if matches!(command, Commands::Status) {
+        None
+    } else {
+        let mut instance = system::instance::open(false, false)
+            .await?
+            .expect("CLI commands never activate another instance");
+        instance.publish_pid(&core::config::AppConfig::config_dir()?)?;
+        Some(instance)
+    };
+
     match command {
         Commands::Status => {
-            let config = core::config::AppConfig::load()?;
-            let connection = core::connection::ConnectionManager::new(&config.interface_name)?;
+            let path = core::config::AppConfig::config_path()?;
+            let config: core::config::AppConfig = match std::fs::read_to_string(path) {
+                Ok(content) => toml::from_str(&content)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                Err(e) => return Err(e.into()),
+            };
+            let connection = core::connection::ConnectionManager::snapshot(&config.interface_name)?;
 
             let status = match connection.state() {
                 ConnectionState::Connected => "connected",

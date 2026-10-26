@@ -5,7 +5,7 @@ use crate::core::{
   provider::{get_provider, ProviderType},
   server::Server,
 };
-use crate::system::{cleanup, network::NetworkStats};
+use crate::system::network::NetworkStats;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, watch};
 
@@ -264,10 +264,7 @@ async fn run(
   tx: &watch::Sender<Snapshot>,
   stopping: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
-  cleanup::create_pid_file()?;
-  let result = run_owned(&mut rx, tx, stopping).await;
-  cleanup::remove_pid_file()?;
-  result
+  run_owned(&mut rx, tx, stopping).await
 }
 
 async fn run_owned(

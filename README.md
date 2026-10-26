@@ -55,6 +55,22 @@ VPN settings, or run network/firewall operations. Without it, the GUI uses the
 existing configuration, credentials and connection engine. Only one
 interactive instance can run at a time.
 
+Launching either GUI binary again focuses the existing window on Niri. The
+activation socket is private to your user; a second launch never starts another
+VPN worker. Other compositors report that the existing window must be selected
+manually. Preview windows use a separate instance lock.
+
+The GUI and CLI commands share an OS lock under
+`$XDG_RUNTIME_DIR/monarch-lazyvpn` (default: `/run/user/<uid>/monarch-lazyvpn`).
+Crashes release the lock automatically. Do not delete `instance.lock` while the
+application is running. `status` and `monarch-lazyvpn-status` remain available
+without taking ownership; other CLI commands require closing the GUI first.
+An older running version must be closed once after upgrading.
+
+Connection snapshots are replaced atomically with private file permissions.
+Reopening after a crash or closing with `keep_vpn_on_exit` enabled uses the
+existing recovery path, without treating a reused PID as a running instance.
+
 The GUI supports importing `.conf` files through the desktop file picker,
 connecting, switching and disconnecting, searching, favorites, provider groups,
 refreshing servers, and editing/renaming/deleting personal profiles. Custom-profile

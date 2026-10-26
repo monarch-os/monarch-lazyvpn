@@ -24,10 +24,25 @@ pub fn run() -> anyhow::Result<()> {
     .with_writer(std::io::stderr)
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .init();
-  launch(args.preview)
+  launch(args.preview, || Ok(()))
 }
 
-pub fn launch(preview: bool) -> anyhow::Result<()> {
+pub fn launch(preview: bool, initialize: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+  let runtime = tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(2)
+    .enable_all()
+    .build()?;
+  let Some(mut instance) = runtime.block_on(crate::system::instance::open(true, preview))? else {
+    return Ok(());
+  };
+  if !preview {
+    instance.publish_pid(&crate::core::config::AppConfig::config_dir()?)?;
+  }
+  initialize()?;
+  {
+    let _runtime = runtime.enter();
+    instance.serve_activation()?;
+  }
   let mut engine = engine::Engine::start(preview);
   let commands = engine.commands.clone();
   let snapshots = engine.snapshots.clone();
@@ -35,7 +50,11 @@ pub fn launch(preview: bool) -> anyhow::Result<()> {
     .with_assets(assets::Assets)
     .run(move |cx| {
       gpui_omarchy::init(cx);
-      theme::monarch().apply(cx);
+      theme::path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| theme::parse(&bytes))
+        .unwrap_or_else(theme::monarch)
+        .apply(cx);
       cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
           cx.quit();
